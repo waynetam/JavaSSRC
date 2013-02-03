@@ -1,0 +1,4 @@
+All parts of this library (with the exception of ResampleHelper, I0Bessel, and SplitRadixFft) are
+distributed under the LGPL license, please see LPGL.txt for details.
+
+Please see the source of ResampleHelper, I0Bessel, and SplitRadixFft for their respective licenses.
