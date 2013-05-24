@@ -103,11 +103,6 @@ public class JavaSSRC {
 
 	private static final int POOLSIZE = 97;
 
-	private double[][] shapebuf;
-	private int shaper_type,shaper_len,shaper_clipmin,shaper_clipmax;
-	private double[] randbuf;
-	private int randptr = 0;
-
 	private final SplitRadixFft FFT = new SplitRadixFft();
 
 	private ProgressListener listener = null;
@@ -127,7 +122,6 @@ public class JavaSSRC {
 	private boolean normalize = false;
 	private boolean fast = false;
 	private String tempFilename = null;
-	private byte[] outBytes = null;
 	
 	private ResampleContext rCtx = null;
 	
@@ -152,6 +146,13 @@ public class JavaSSRC {
 		protected int ditherSample = 0;
 		protected ByteOrder srcByteOrder = ByteOrder.LITTLE_ENDIAN;
 		protected String tmpFn = null;
+		protected SplitRadixFft FFT; 
+		protected double[][] shapebuf;
+		protected int shaper_type,shaper_len,shaper_clipmin,shaper_clipmax;
+		protected double[] randbuf;
+		protected int randptr = 0;
+		protected byte[] outBytes = null;
+
 		
 		int osf;
 		int fs1,fs2;
@@ -180,7 +181,7 @@ public class JavaSSRC {
 		boolean init = true;
 	}
 	
-	private void reset()
+	private static void reset(ResampleContext rCtx)
 	{
 		rCtx.init = true;
 		rCtx.sumread = rCtx.sumwrite = 0;
@@ -188,7 +189,7 @@ public class JavaSSRC {
 		rCtx.peak = 0;
 
 		rCtx.fft_ip[0] = 0;
-		FFT.rdft(rCtx.nb,1,rCtx.stageA,rCtx.fft_ip,rCtx.fft_w);
+		rCtx.FFT.rdft(rCtx.nb,1,rCtx.stageA,rCtx.fft_ip,rCtx.fft_w);
 	    
 	    for(int i=0;i<rCtx.nch;i++){
 	    	Arrays.fill(rCtx.buf1[i],0);
@@ -208,7 +209,7 @@ public class JavaSSRC {
 	
 	public byte[] getOutBytes()
 	{
-		return outBytes;
+		return rCtx.outBytes;
 	}
 	
 	public double getPeak(){
@@ -299,6 +300,7 @@ public class JavaSSRC {
 
 	public void initialize(){
 		rCtx = new ResampleContext();
+		rCtx.FFT = FFT;
 		rCtx.rnch = srcChannels;
 		rCtx.mono = monoChannel < srcChannels?monoChannel:srcChannels-1;
 		if(rCtx.rnch > 1 && rCtx.mono > -1)
@@ -342,9 +344,9 @@ public class JavaSSRC {
 			init_shaper();
 		
 		if (rCtx.sfrq < rCtx.dfrq){
-			initUpSample();
+			initUpSample(rCtx);
 		}else if (rCtx.sfrq > rCtx.dfrq){
-			initDownSample();
+			initDownSample(rCtx);
 		}else{
 			rCtx.rawinbuf = new byte[16384*rCtx.dbps*rCtx.rnch];
 			if(rCtx.twopass)
@@ -353,11 +355,108 @@ public class JavaSSRC {
 				rCtx.rawoutbuf = new byte[(int)(16384*rCtx.dbps*rCtx.dnch*((double)rCtx.dbps/rCtx.bps))];
 			rCtx.inBuffer = ByteBuffer.wrap(rCtx.rawinbuf).order(rCtx.srcByteOrder);
 			rCtx.outBuffer = ByteBuffer.wrap(rCtx.rawoutbuf).order(ByteOrder.LITTLE_ENDIAN);
-			outBytes = new byte[rCtx.rawoutbuf.length];
+			rCtx.outBytes = new byte[rCtx.rawoutbuf.length];
 		}
 	}
 	
-	private void initUpSample(){
+	private void init_shaper()
+	{
+		int i;
+		int[] pool = new int[POOLSIZE];
+
+		for(i=1;i<6;i++) if (rCtx.dfrq == scoeffreq[i]) break;
+		if ((rCtx.dither == 3 || rCtx.dither == 4) && i == 6) {
+			showMessage(String.format("Warning: ATH based noise shaping for destination frequency %dHz is not available, using triangular dither",rCtx.dfrq));
+		}
+		if (rCtx.dither == 2 || i == 6) i = 0;
+		if (rCtx.dither == 4 && (i == 1 || i == 2)) i += 5;
+
+		rCtx.shaper_type = i;
+
+		rCtx.shaper_len = scoeflen[rCtx.shaper_type];
+		rCtx.shapebuf = new double[rCtx.nch][rCtx.shaper_len];
+
+		if (rCtx.dbps == 1) {rCtx.shaper_clipmin = -0x80; rCtx.shaper_clipmax = 0x7f;}
+		if (rCtx.dbps == 2) {rCtx.shaper_clipmin = -0x8000; rCtx.shaper_clipmax = 0x7fff;}
+		if (rCtx.dbps == 3) {rCtx.shaper_clipmin = -0x800000; rCtx.shaper_clipmax = 0x7fffff;}
+		if (rCtx.dbps == 4) {rCtx.shaper_clipmin = -0x80000000; rCtx.shaper_clipmax = 0x7fffffff;}
+
+		rCtx.randbuf = new double[RANDBUFLEN];
+		Random random = new Random(System.nanoTime());
+
+		for(i=0;i<POOLSIZE;i++) pool[i] = random.nextInt(Integer.MAX_VALUE); 
+
+		int r1,r2,p;
+		double r;
+
+		switch(rCtx.pdf){
+		case 0: // rectangular
+			for(i=0;i<RANDBUFLEN;i++){
+				p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
+				r1 = pool[p]; pool[p] = random.nextInt(Integer.MAX_VALUE);
+				rCtx.randbuf[i] = rCtx.noiseamp * (((double)r1)/Integer.MAX_VALUE-0.5);
+			}
+			break;
+		case 1: // triangular
+			for(i=0;i<RANDBUFLEN;i++){
+				p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
+				r1 = pool[p]; pool[p] = random.nextInt(Integer.MAX_VALUE);
+				p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
+				r2 = pool[p]; pool[p] = random.nextInt(Integer.MAX_VALUE);
+				rCtx.randbuf[i] = rCtx.noiseamp * ((((double)r1)/Integer.MAX_VALUE)-(((double)r2)/Integer.MAX_VALUE));
+			}
+			break;
+		case 2: // gaussian
+			int sw = 0;
+			double t = 0, u = 0;
+
+			for(i=0;i<RANDBUFLEN;i++)
+			{
+				if (sw == 0) {
+					sw = 1;
+
+					p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
+					r = ((double)pool[p])/Integer.MAX_VALUE; pool[p] = random.nextInt(Integer.MAX_VALUE);
+					if (r == 1.0) r = 0.0;
+
+					t = Math.sqrt(-2 * Math.log(1-r));
+
+					p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
+					r = ((double)pool[p])/Integer.MAX_VALUE; pool[p] = random.nextInt(Integer.MAX_VALUE);
+
+					u = 2 * Math.PI * r;
+
+					rCtx.randbuf[i] = rCtx.noiseamp * t * Math.cos(u);
+				} else {
+					sw = 0;
+					rCtx.randbuf[i] = rCtx.noiseamp * t * Math.sin(u);
+				}
+			}
+			break;
+		}
+
+		rCtx.randptr = 0;
+
+		if (rCtx.dither == 0 || rCtx.dither == 1)
+			rCtx.ditherSample = 1;
+		else
+			rCtx.ditherSample = samp[rCtx.shaper_type];
+	}
+
+	private void showProgress(double p)
+	{
+		if(listener != null){
+			listener.onChanged(p);
+		}
+	}
+
+	private void showMessage(String msg)
+	{
+		if(listener != null)
+			listener.onShowMessage(msg);
+	}
+
+	private static void initUpSample(ResampleContext rCtx){
 		int filter2len = rCtx.FFTFIRLEN; /* stage 2 filter length */
 
 		/* Make stage 1 filter */
@@ -387,7 +486,7 @@ public class JavaSSRC {
 		rCtx.n1 = (int)(rCtx.fs1/df*d+1);
 		if (rCtx.n1 % 2 == 0) rCtx.n1++;
 
-		alp = alpha();
+		alp = alpha(rCtx);
 		iza = I0Bessel.value(alp);
 		//printf("iza = %g\n",iza);
 
@@ -430,7 +529,7 @@ public class JavaSSRC {
 			if (df < rCtx.DF) break;
 		}
 
-		alp = alpha();
+		alp = alpha(rCtx);
 
 		iza = I0Bessel.value(alp);
 
@@ -448,7 +547,7 @@ public class JavaSSRC {
 		wsize     = rCtx.nb/2;
 		rCtx.fft_w     = new double[wsize];
 
-		FFT.rdft(rCtx.nb,1,rCtx.stageA,rCtx.fft_ip,rCtx.fft_w);
+		rCtx.FFT.rdft(rCtx.nb,1,rCtx.stageA,rCtx.fft_ip,rCtx.fft_w);
 
 		/* Apply filters */
 
@@ -472,10 +571,9 @@ public class JavaSSRC {
 
 		rCtx.inBuffer = ByteBuffer.wrap(rCtx.rawinbuf).order(rCtx.srcByteOrder);
 		rCtx.outBuffer = ByteBuffer.wrap(rCtx.rawoutbuf).order(ByteOrder.LITTLE_ENDIAN);
-		
 	}
 	
-	private void initDownSample(){
+	private static void initDownSample(ResampleContext rCtx){
 		int filter1len = rCtx.FFTFIRLEN; // stage 1 filter length 
 
 		// Make stage 1 filter 
@@ -508,7 +606,7 @@ public class JavaSSRC {
 			if (df < rCtx.DF) break;
 		}
 
-		alp = alpha();
+		alp = alpha(rCtx);
 
 		iza = I0Bessel.value(alp);
 
@@ -527,7 +625,7 @@ public class JavaSSRC {
 		wsize     = rCtx.nb/2;
 		rCtx.fft_w     = new double[wsize];
 
-		FFT.rdft(rCtx.nb,1,rCtx.stageA,rCtx.fft_ip,rCtx.fft_w);
+		rCtx.FFT.rdft(rCtx.nb,1,rCtx.stageA,rCtx.fft_ip,rCtx.fft_w);
 
 		// Make stage 2 filter 
 
@@ -553,7 +651,7 @@ public class JavaSSRC {
 			rCtx.n2 = (int) (rCtx.fs2/df*d+1);
 			if (rCtx.n2 % 2 == 0) rCtx.n2++;
 
-			alp = alpha();
+			alp = alpha(rCtx);
 			iza = I0Bessel.value(alp);
 
 			rCtx.ny = rCtx.fs2/rCtx.fs1; // 0でないサンプルがfs2で何サンプルおきにあるか？
@@ -597,183 +695,86 @@ public class JavaSSRC {
 	
 		rCtx.delay = (int) ((double)rCtx.n1/2/((double)rCtx.fs1/rCtx.dfrq)+(double)rCtx.n2/2/((double)rCtx.fs2/rCtx.dfrq));
 	}
-	
-	private void init_shaper()
-	{
-		int i;
-		int[] pool = new int[POOLSIZE];
 
-		for(i=1;i<6;i++) if (rCtx.dfrq == scoeffreq[i]) break;
-		if ((rCtx.dither == 3 || rCtx.dither == 4) && i == 6) {
-			showMessage(String.format("Warning: ATH based noise shaping for destination frequency %dHz is not available, using triangular dither",rCtx.dfrq));
-		}
-		if (rCtx.dither == 2 || i == 6) i = 0;
-		if (rCtx.dither == 4 && (i == 1 || i == 2)) i += 5;
-
-		shaper_type = i;
-
-		shaper_len = scoeflen[shaper_type];
-		shapebuf = new double[rCtx.nch][shaper_len];
-
-		if (rCtx.dbps == 1) {shaper_clipmin = -0x80; shaper_clipmax = 0x7f;}
-		if (rCtx.dbps == 2) {shaper_clipmin = -0x8000; shaper_clipmax = 0x7fff;}
-		if (rCtx.dbps == 3) {shaper_clipmin = -0x800000; shaper_clipmax = 0x7fffff;}
-		if (rCtx.dbps == 4) {shaper_clipmin = -0x80000000; shaper_clipmax = 0x7fffffff;}
-
-		randbuf = new double[RANDBUFLEN];
-		Random random = new Random(System.nanoTime());
-
-		for(i=0;i<POOLSIZE;i++) pool[i] = random.nextInt(Integer.MAX_VALUE); 
-
-		int r1,r2,p;
-		double r;
-
-		switch(rCtx.pdf){
-		case 0: // rectangular
-			for(i=0;i<RANDBUFLEN;i++){
-				p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
-				r1 = pool[p]; pool[p] = random.nextInt(Integer.MAX_VALUE);
-				randbuf[i] = rCtx.noiseamp * (((double)r1)/Integer.MAX_VALUE-0.5);
-			}
-			break;
-		case 1: // triangular
-			for(i=0;i<RANDBUFLEN;i++){
-				p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
-				r1 = pool[p]; pool[p] = random.nextInt(Integer.MAX_VALUE);
-				p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
-				r2 = pool[p]; pool[p] = random.nextInt(Integer.MAX_VALUE);
-				randbuf[i] = rCtx.noiseamp * ((((double)r1)/Integer.MAX_VALUE)-(((double)r2)/Integer.MAX_VALUE));
-			}
-			break;
-		case 2: // gaussian
-			int sw = 0;
-			double t = 0, u = 0;
-
-			for(i=0;i<RANDBUFLEN;i++)
-			{
-				if (sw == 0) {
-					sw = 1;
-
-					p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
-					r = ((double)pool[p])/Integer.MAX_VALUE; pool[p] = random.nextInt(Integer.MAX_VALUE);
-					if (r == 1.0) r = 0.0;
-
-					t = Math.sqrt(-2 * Math.log(1-r));
-
-					p = random.nextInt(Integer.MAX_VALUE) % POOLSIZE;
-					r = ((double)pool[p])/Integer.MAX_VALUE; pool[p] = random.nextInt(Integer.MAX_VALUE);
-
-					u = 2 * Math.PI * r;
-
-					randbuf[i] = rCtx.noiseamp * t * Math.cos(u);
-				} else {
-					sw = 0;
-					randbuf[i] = rCtx.noiseamp * t * Math.sin(u);
-				}
-			}
-			break;
-		}
-
-		randptr = 0;
-
-		if (rCtx.dither == 0 || rCtx.dither == 1)
-			rCtx.ditherSample = 1;
-		else
-			rCtx.ditherSample = samp[shaper_type];
-	}
-
-	private int do_shaping(double s,int ch)
+	private static int do_shaping(ResampleContext rCtx,double s,int ch)
 	{
 		double u,h;
 		int i;
 
 		if (rCtx.dither == 1) {
-			s += randbuf[randptr++ & (RANDBUFLEN-1)];
+			s += rCtx.randbuf[rCtx.randptr++ & (RANDBUFLEN-1)];
 
-			if (s < shaper_clipmin) {
-				double d = (double)s/shaper_clipmin;
+			if (s < rCtx.shaper_clipmin) {
+				double d = (double)s/rCtx.shaper_clipmin;
 				rCtx.peak = rCtx.peak < d ? d : rCtx.peak;
-				s = shaper_clipmin;
+				s = rCtx.shaper_clipmin;
 			}
-			if (s > shaper_clipmax) {
-				double d = (double)s/shaper_clipmax;
+			if (s > rCtx.shaper_clipmax) {
+				double d = (double)s/rCtx.shaper_clipmax;
 				rCtx.peak = rCtx.peak < d ? d : rCtx.peak;
-				s = shaper_clipmax;
+				s = rCtx.shaper_clipmax;
 			}
 
 			return RINT(s);
 		}
 
 		h = 0;
-		for(i=0;i<shaper_len;i++) h += shapercoefs[shaper_type][i]*shapebuf[ch][i];
+		for(i=0;i<rCtx.shaper_len;i++) h += shapercoefs[rCtx.shaper_type][i]*rCtx.shapebuf[ch][i];
 		s += h;
 		u = s;
-		s += randbuf[randptr++ & (RANDBUFLEN-1)];
+		s += rCtx.randbuf[rCtx.randptr++ & (RANDBUFLEN-1)];
 
-		for(i=shaper_len-2;i>=0;i--) shapebuf[ch][i+1] = shapebuf[ch][i];
+		for(i=rCtx.shaper_len-2;i>=0;i--) rCtx.shapebuf[ch][i+1] = rCtx.shapebuf[ch][i];
 
-		if (s < shaper_clipmin) {
-			double d = (double)s/shaper_clipmin;
+		if (s < rCtx.shaper_clipmin) {
+			double d = (double)s/rCtx.shaper_clipmin;
 			rCtx.peak = rCtx.peak < d ? d : rCtx.peak;
-			s = shaper_clipmin;
-			shapebuf[ch][0] = s-u;
+			s = rCtx.shaper_clipmin;
+			rCtx.shapebuf[ch][0] = s-u;
 
-			if (shapebuf[ch][0] >  1) shapebuf[ch][0] =  1;
-			if (shapebuf[ch][0] < -1) shapebuf[ch][0] = -1;
-		} else if (s > shaper_clipmax) {
-			double d = (double)s/shaper_clipmax;
+			if (rCtx.shapebuf[ch][0] >  1) rCtx.shapebuf[ch][0] =  1;
+			if (rCtx.shapebuf[ch][0] < -1) rCtx.shapebuf[ch][0] = -1;
+		} else if (s > rCtx.shaper_clipmax) {
+			double d = (double)s/rCtx.shaper_clipmax;
 			rCtx.peak = rCtx.peak < d ? d : rCtx.peak;
-			s = shaper_clipmax;
-			shapebuf[ch][0] = s-u;
+			s = rCtx.shaper_clipmax;
+			rCtx.shapebuf[ch][0] = s-u;
 
-			if (shapebuf[ch][0] >  1) shapebuf[ch][0] =  1;
-			if (shapebuf[ch][0] < -1) shapebuf[ch][0] = -1;
+			if (rCtx.shapebuf[ch][0] >  1) rCtx.shapebuf[ch][0] =  1;
+			if (rCtx.shapebuf[ch][0] < -1) rCtx.shapebuf[ch][0] = -1;
 		} else {
 			s = RINT(s);
-			shapebuf[ch][0] = s-u;
+			rCtx.shapebuf[ch][0] = s-u;
 		}
 
 		return (int)s;
 	}
 
-	private double alpha()
+	private static double alpha(ResampleContext rCtx)
 	{
 		if (rCtx.AA <= 21) return 0;
 		if (rCtx.AA <= 50) return 0.5842*Math.pow(rCtx.AA-21,0.4)+0.07886*(rCtx.AA-21);
 		return 0.1102*(rCtx.AA-8.7);
 	}
 
-	private double win(double n,int len,double alp,double iza)
+	private static double win(double n,int len,double alp,double iza)
 	{
 		return I0Bessel.value(alp*Math.sqrt(1-4*n*n/(((double)len-1)*((double)len-1))))/iza;
 	}
 
-	private double sinc(double x)
+	private static double sinc(double x)
 	{
 		return x == 0 ? 1 : Math.sin(x)/x;
 	}
 
-	private double hn_lpf(int n,double lpf,double fs)
+	private static double hn_lpf(int n,double lpf,double fs)
 	{
 		double t = 1/fs;
 		double omega = 2*Math.PI*lpf;
 		return 2*lpf*t*sinc(n*omega*t);
 	}
 
-	private void showProgress(double p)
-	{
-		if(listener != null){
-			listener.onChanged(p);
-		}
-	}
-
-	private void showMessage(String msg)
-	{
-		if(listener != null)
-			listener.onShowMessage(msg);
-	}
-	
-	private int gcd(int x, int y)
+	private static int gcd(int x, int y)
 	{
 		int t;
 
@@ -783,7 +784,7 @@ public class JavaSSRC {
 		return x;
 	}
 
-	private int fillInBuf(int[][] samples, int offset, int length){
+	private static int fillInBuf(ResampleContext rCtx, int[][] samples, int offset, int length){
 		int ibOffset = rCtx.nch * rCtx.inbuflen;
 		int len = length * rCtx.nch;
 		switch(rCtx.bps){
@@ -811,7 +812,7 @@ public class JavaSSRC {
 		return length;
 	}
 	
-	private void fillInBuf(int length){
+	private static void fillInBuf(ResampleContext rCtx, int length){
 		int offset = rCtx.nch * rCtx.inbuflen;
 		int len = length * rCtx.nch;
 		int j = 0,jCnt = rCtx.bps;
@@ -852,7 +853,7 @@ public class JavaSSRC {
 		}
 	}
 
-	private void fillOutBuf(int dbps, double gain, int nsmplwrt){
+	private static void fillOutBuf(ResampleContext rCtx, int dbps, double gain, int nsmplwrt){
 		int i,j,s;
 		double gain2,d;
 		if (rCtx.twopass) {
@@ -871,7 +872,7 @@ public class JavaSSRC {
 					for(i=0;i<nsmplwrt;i++)
 					{
 						for(j=0;j<rCtx.dnch;j++){
-							s = do_shaping(rCtx.outbuf[i*rCtx.nch+(j%rCtx.nch)]*gain2,(j%rCtx.nch));
+							s = do_shaping(rCtx,rCtx.outbuf[i*rCtx.nch+(j%rCtx.nch)]*gain2,(j%rCtx.nch));
 							rCtx.outBuffer.put((byte)(s + 0x80)); //	((unsigned char *)rawoutbuf)[i] = s + 0x80;
 						}
 					}
@@ -901,7 +902,7 @@ public class JavaSSRC {
 				if (rCtx.dither > 0) {
 					for(i=0;i<nsmplwrt;i++)	{
 						for(j=0;j<rCtx.dnch;j++){
-							s = do_shaping(rCtx.outbuf[i*rCtx.nch+(j%rCtx.nch)]*gain2,(j%rCtx.nch));
+							s = do_shaping(rCtx,rCtx.outbuf[i*rCtx.nch+(j%rCtx.nch)]*gain2,(j%rCtx.nch));
 							rCtx.outBuffer.putShort((short)s);
 						}
 					}
@@ -931,7 +932,7 @@ public class JavaSSRC {
 					for(i=0;i<nsmplwrt;i++)
 					{
 						for(j=0;j<rCtx.dnch;j++){
-							s = do_shaping(rCtx.outbuf[i*rCtx.nch+(j%rCtx.nch)]*gain2,(j%rCtx.nch));
+							s = do_shaping(rCtx,rCtx.outbuf[i*rCtx.nch+(j%rCtx.nch)]*gain2,(j%rCtx.nch));
 							rCtx.outBuffer.putShort((short)s);
 							s >>= 16;
 							rCtx.outBuffer.put((byte)s);
@@ -964,7 +965,7 @@ public class JavaSSRC {
 		}
 	}
 
-	private int writeOutBytes(int nsmplwrt, int dbps, int offset, boolean isLast){
+	private static int writeOutBytes(ResampleContext rCtx, int nsmplwrt, int dbps, int offset, boolean isLast){
 		int writeLen = 0,writeOffset = 0;
 		boolean isDone = false;
 		int nch = rCtx.twopass?rCtx.nch:rCtx.dnch;
@@ -975,7 +976,7 @@ public class JavaSSRC {
 					writeLen = dbps*nch*nsmplwrt;
 				} else {
 					writeLen = dbps*nch*(int)(Math.floor((double)rCtx.sumread*rCtx.dfrq/rCtx.sfrq)+2-rCtx.sumwrite);
-					reset();
+					reset(rCtx);
 					isDone = true;
 				}
 			} else {
@@ -991,7 +992,7 @@ public class JavaSSRC {
 						writeLen = dbps*nch*(nsmplwrt-rCtx.delay);
 					} else {
 						writeLen = (int)(dbps*nch*(Math.floor((double)rCtx.sumread*rCtx.dfrq/rCtx.sfrq)+2-rCtx.sumwrite-rCtx.delay));
-						reset();
+						reset(rCtx);
 						isDone = true;
 					}
 				} else {
@@ -1002,21 +1003,21 @@ public class JavaSSRC {
 		}
 
 		if(writeLen > 0){
-			if(outBytes == null)
-				outBytes = new byte[rCtx.outBuffer.limit()];
-			if(outBytes.length - offset < rCtx.outBuffer.limit()){
+			if(rCtx.outBytes == null)
+				rCtx.outBytes = new byte[rCtx.outBuffer.limit()];
+			if(rCtx.outBytes.length - offset < rCtx.outBuffer.limit()){
 				byte[] tmpBytes = new byte[offset + rCtx.outBuffer.limit()];
-				System.arraycopy(outBytes, 0, tmpBytes, 0, offset);
-				outBytes = tmpBytes;
+				System.arraycopy(rCtx.outBytes, 0, tmpBytes, 0, offset);
+				rCtx.outBytes = tmpBytes;
 			}
 			rCtx.outBuffer.position(writeOffset);
-			rCtx.outBuffer.get(outBytes, offset, writeLen);
+			rCtx.outBuffer.get(rCtx.outBytes, offset, writeLen);
 		}
 			
 		return isDone?-1:writeLen;
 	}
 
-	private boolean writeOutStream(OutputStream fpo, int nsmplwrt, int dbps, boolean isLast) throws IOException{
+	private static boolean writeOutStream(ResampleContext rCtx, OutputStream fpo, int nsmplwrt, int dbps, boolean isLast) throws IOException{
 		int nch = rCtx.twopass?rCtx.nch:rCtx.dnch;
 
 		if (!rCtx.init) {
@@ -1028,7 +1029,7 @@ public class JavaSSRC {
                     int limitData = (int) (dbps * nch * (Math.floor((double) rCtx.sumread * rCtx.dfrq / rCtx.sfrq) + 2 - rCtx.sumwrite));
                     if (limitData > 0)
                     	fpo.write(rCtx.rawoutbuf,0,limitData);
-					reset();
+					reset(rCtx);
 					return true;
 				}
 			} else {
@@ -1045,7 +1046,7 @@ public class JavaSSRC {
 						rCtx.sumwrite += nsmplwrt-rCtx.delay;
 					} else {
 						fpo.write(rCtx.rawoutbuf,dbps*nch*rCtx.delay,(int)(dbps*nch*(Math.floor((double)rCtx.sumread*rCtx.dfrq/rCtx.sfrq)+2-rCtx.sumwrite-rCtx.delay)));
-						reset();
+						reset(rCtx);
 						return true;
 					}
 				} else {
@@ -1058,7 +1059,7 @@ public class JavaSSRC {
 		return false;
 	}
 	
-	private int upSample(int nsmplwrt1)
+	private static int upSample(ResampleContext rCtx, int nsmplwrt1)
 	{
 		// apply stage 1 filter
 		int ch,p,i,j,s1o,no,ip2,nsmplwrt2 = 0;
@@ -1147,7 +1148,7 @@ public class JavaSSRC {
 
 			Arrays.fill(rCtx.buf2[ch], nsmplwrt1, rCtx.nb, 0);
 
-			FFT.rdft(rCtx.nb,1,rCtx.buf2[ch],rCtx.fft_ip,rCtx.fft_w);
+			rCtx.FFT.rdft(rCtx.nb,1,rCtx.buf2[ch],rCtx.fft_ip,rCtx.fft_w);
 
 			rCtx.buf2[ch][0] = rCtx.stageA[0]*rCtx.buf2[ch][0];
 			rCtx.buf2[ch][1] = rCtx.stageA[1]*rCtx.buf2[ch][1]; 
@@ -1164,7 +1165,7 @@ public class JavaSSRC {
 				rCtx.buf2[ch][i*2+1] = im;
 			}
 
-			FFT.rdft(rCtx.nb,-1,rCtx.buf2[ch],rCtx.fft_ip,rCtx.fft_w);
+			rCtx.FFT.rdft(rCtx.nb,-1,rCtx.buf2[ch],rCtx.fft_ip,rCtx.fft_w);
 
 			for(i=rCtx.osc,j=0;i<rCtx.nb2;i+=rCtx.osf,j++)
 			{
@@ -1183,7 +1184,7 @@ public class JavaSSRC {
 		return nsmplwrt2;
 	}
 	
-	private int downSample(){
+	private static int downSample(ResampleContext rCtx){
 		int rps_backup = rCtx.rps;
 		int s2p_backup = rCtx.sp;
 		int i,j,k,ch,t1,bp,nsmplwrt2 = 0;
@@ -1211,7 +1212,7 @@ public class JavaSSRC {
 			for(k=rCtx.nb2;k<rCtx.nb;k++) rCtx.buf1[ch][k] = 0;
 			
 			rCtx.rps = i - rCtx.nb2;
-			FFT.rdft(rCtx.nb,1,rCtx.buf1[ch],rCtx.fft_ip,rCtx.fft_w);
+			rCtx.FFT.rdft(rCtx.nb,1,rCtx.buf1[ch],rCtx.fft_ip,rCtx.fft_w);
 			rCtx.buf1[ch][0] = rCtx.stageA[0]*rCtx.buf1[ch][0];
 			rCtx.buf1[ch][1] = rCtx.stageA[1]*rCtx.buf1[ch][1]; 
 			for(i=1;i<rCtx.nb2;i++)
@@ -1223,7 +1224,7 @@ public class JavaSSRC {
 				rCtx.buf1[ch][i*2+1] = im;
 			}
 
-			FFT.rdft(rCtx.nb,-1,rCtx.buf1[ch],rCtx.fft_ip,rCtx.fft_w);
+			rCtx.FFT.rdft(rCtx.nb,-1,rCtx.buf1[ch],rCtx.fft_ip,rCtx.fft_w);
 			for(i=0;i<rCtx.nb2;i++) {
 				rCtx.buf2[ch][rCtx.nx+1+i] += rCtx.buf1[ch][i];
 			}
@@ -1257,14 +1258,14 @@ public class JavaSSRC {
 		return nsmplwrt2;
 	}
 
-	private int upsample(int[][] samples, int length, double gain, boolean isLast){
+	private static int upsample(ResampleContext rCtx, int[][] samples, int length, double gain, boolean isLast){
 		int nsmplwrt1,nsmplwrt2;
 		int writeLen = 0;
 		int dbps = rCtx.twopass?8:rCtx.dbps;
 		int toberead = (int)Math.floor((double)rCtx.nb2*rCtx.sfrq/(rCtx.dfrq*rCtx.osf))+1+rCtx.nx-rCtx.inbuflen;
 
 		if(length < toberead && !isLast){
-			rCtx.inbuflen += fillInBuf(samples,0,length);
+			rCtx.inbuflen += fillInBuf(rCtx,samples,0,length);
 			return 0;
 		}
 
@@ -1272,12 +1273,12 @@ public class JavaSSRC {
 			rCtx.sumread += rCtx.inbuflen;
 			nsmplwrt1 = rCtx.nb2;
 			rCtx.ip = ((rCtx.sfrq*(rCtx.rp-1)+rCtx.fs1)/rCtx.fs1)*rCtx.nch;
-			nsmplwrt2 = upSample(nsmplwrt1);
+			nsmplwrt2 = upSample(rCtx,nsmplwrt1);
 			rCtx.rp += nsmplwrt1 * (rCtx.sfrq / rCtx.frqgcd) / rCtx.osf;
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt2);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
 			rCtx.outBuffer.flip();
-			return writeOutBytes(nsmplwrt2,dbps,0,isLast);
+			return writeOutBytes(rCtx,nsmplwrt2,dbps,0,isLast);
 		}
 
 		int outBytesWritten = 0;
@@ -1287,10 +1288,10 @@ public class JavaSSRC {
 			toberead = (int)Math.floor((double)rCtx.nb2*rCtx.sfrq/(rCtx.dfrq*rCtx.osf))+1+rCtx.nx-rCtx.inbuflen;
 			
 			if(length - lenUsed < toberead && !isLast){
-				rCtx.inbuflen += fillInBuf(samples,lenUsed,length - lenUsed);
+				rCtx.inbuflen += fillInBuf(rCtx,samples,lenUsed,length - lenUsed);
 				return outBytesWritten;
 			}
-			rCtx.inbuflen += fillInBuf(samples,lenUsed,toberead);
+			rCtx.inbuflen += fillInBuf(rCtx,samples,lenUsed,toberead);
 			lenUsed += toberead;
 			rCtx.sumread += toberead;
 
@@ -1298,15 +1299,15 @@ public class JavaSSRC {
 
 			rCtx.ip = ((rCtx.sfrq*(rCtx.rp-1)+rCtx.fs1)/rCtx.fs1)*rCtx.nch;
 
-			nsmplwrt2 = upSample(nsmplwrt1);
+			nsmplwrt2 = upSample(rCtx,nsmplwrt1);
 			
 			rCtx.rp += nsmplwrt1 * (rCtx.sfrq / rCtx.frqgcd) / rCtx.osf;
 
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt2);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
 			rCtx.outBuffer.flip();
 
-			writeLen = writeOutBytes(nsmplwrt2,dbps,outBytesWritten,isLast);
+			writeLen = writeOutBytes(rCtx,nsmplwrt2,dbps,outBytesWritten,isLast);
 			if(writeLen < 0)
 				break;
 			outBytesWritten += writeLen;
@@ -1323,7 +1324,7 @@ public class JavaSSRC {
 		return outBytesWritten;
 	}
 	
-	private int upsample(byte[] samples, int offset, int length, double gain, boolean isLast){
+	private static int upsample(ResampleContext rCtx, byte[] samples, int offset, int length, double gain, boolean isLast){
 		int nsmplread,nsmplwrt1,nsmplwrt2;
 		int writeLen = 0;
 		int dbps = rCtx.twopass?8:rCtx.dbps;
@@ -1337,19 +1338,19 @@ public class JavaSSRC {
 		if(length == 0 && rCtx.inBuffer.hasRemaining() && isLast){
 			nsmplread = rCtx.inBuffer.position()/(rCtx.bps*rCtx.rnch);
 			rCtx.inBuffer.flip();
-			fillInBuf(nsmplread);
+			fillInBuf(rCtx,nsmplread);
 			Arrays.fill(rCtx.inbuf, rCtx.nch*rCtx.inbuflen+nsmplread*rCtx.nch, rCtx.nch*rCtx.inbuflen+rCtx.nch*toberead, 0);
 			rCtx.inBuffer.clear();
 			rCtx.inbuflen += toberead;
 			rCtx.sumread += nsmplread;
 			nsmplwrt1 = rCtx.nb2;
 			rCtx.ip = ((rCtx.sfrq*(rCtx.rp-1)+rCtx.fs1)/rCtx.fs1)*rCtx.nch;
-			nsmplwrt2 = upSample(nsmplwrt1);
+			nsmplwrt2 = upSample(rCtx,nsmplwrt1);
 			rCtx.rp += nsmplwrt1 * (rCtx.sfrq / rCtx.frqgcd) / rCtx.osf;
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt2);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
 			rCtx.outBuffer.flip();
-			return writeOutBytes(nsmplwrt2,dbps,0,isLast);
+			return writeOutBytes(rCtx,nsmplwrt2,dbps,0,isLast);
 		}
 
 		int outBytesWritten = 0;
@@ -1369,7 +1370,7 @@ public class JavaSSRC {
 				return outBytesWritten;
 
 			rCtx.inBuffer.flip();
-			fillInBuf(toberead);
+			fillInBuf(rCtx,toberead);
 			rCtx.inBuffer.clear();
 
 			rCtx.inbuflen += toberead;
@@ -1380,15 +1381,15 @@ public class JavaSSRC {
 
 			rCtx.ip = ((rCtx.sfrq*(rCtx.rp-1)+rCtx.fs1)/rCtx.fs1)*rCtx.nch;
 
-			nsmplwrt2 = upSample(nsmplwrt1);
+			nsmplwrt2 = upSample(rCtx,nsmplwrt1);
 			
 			rCtx.rp += nsmplwrt1 * (rCtx.sfrq / rCtx.frqgcd) / rCtx.osf;
 
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt2);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
 			rCtx.outBuffer.flip();
 
-			writeLen = writeOutBytes(nsmplwrt2,dbps,outBytesWritten,isLast);
+			writeLen = writeOutBytes(rCtx,nsmplwrt2,dbps,outBytesWritten,isLast);
 			if(writeLen < 0)
 				break;
 			outBytesWritten += writeLen;
@@ -1440,7 +1441,7 @@ public class JavaSSRC {
 			}
 			rCtx.inBuffer.limit(nsmplread);
 			nsmplread /= rCtx.bps*rCtx.rnch;
-			fillInBuf(nsmplread);
+			fillInBuf(rCtx,nsmplread);
 			Arrays.fill(rCtx.inbuf, rCtx.nch*rCtx.inbuflen+nsmplread*rCtx.nch, rCtx.nch*rCtx.inbuflen+rCtx.nch*toberead2, 0);
 
 			rCtx.inbuflen += toberead2;
@@ -1453,14 +1454,14 @@ public class JavaSSRC {
 			nsmplwrt1 = rCtx.nb2;
 
 			rCtx.ip = ((rCtx.sfrq*(rCtx.rp-1)+rCtx.fs1)/rCtx.fs1)*rCtx.nch;
-			nsmplwrt2 = upSample(nsmplwrt1);
+			nsmplwrt2 = upSample(rCtx,nsmplwrt1);
 			rCtx.rp += nsmplwrt1 * (rCtx.sfrq / rCtx.frqgcd) / rCtx.osf;
 
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt2);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
 			rCtx.outBuffer.flip();
 
-			if(writeOutStream(fpo, nsmplwrt2, dbps, ending))
+			if(writeOutStream(rCtx, fpo, nsmplwrt2, dbps, ending))
 				break;
 
 			rCtx.ds = (rCtx.rp-1)/(rCtx.fs1/rCtx.sfrq);
@@ -1473,7 +1474,7 @@ public class JavaSSRC {
 		showProgress(1);
 	}
 
-	private int downsample(int[][] samples, int length, double gain, boolean isLast)
+	private static int downsample(ResampleContext rCtx, int[][] samples, int length, double gain, boolean isLast)
 	{
 		int nsmplwrt;
 		int writeLen = 0;
@@ -1482,20 +1483,20 @@ public class JavaSSRC {
 		
 		
 		if(rCtx.inbuflen + length < toberead && !isLast){
-			rCtx.inbuflen += fillInBuf(samples,0,length);
+			rCtx.inbuflen += fillInBuf(rCtx,samples,0,length);
 			return 0;
 		}
 
 		if(length == 0 && rCtx.inbuflen > 0 && isLast){
 			Arrays.fill(rCtx.inbuf, rCtx.inbuflen*rCtx.nch, toberead*rCtx.nch, 0);
 			rCtx.sumread += rCtx.inbuflen;
-			nsmplwrt = downSample();
+			nsmplwrt = downSample(rCtx);
 			rCtx.inbuflen = 0;
 			rCtx.rp += nsmplwrt * (rCtx.fs2 / rCtx.dfrq);
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt);
 			rCtx.outBuffer.flip();
-			return writeOutBytes(nsmplwrt,dbps,0,isLast);
+			return writeOutBytes(rCtx,nsmplwrt,dbps,0,isLast);
 		}
 		
 		int outBytesWritten = 0;
@@ -1505,23 +1506,23 @@ public class JavaSSRC {
 			toberead = ((rCtx.nb2-rCtx.rps-1)/rCtx.osf+1) - rCtx.inbuflen;
 
 			if(length - lenUsed < toberead && !isLast){
-				rCtx.inbuflen += fillInBuf(samples,lenUsed,length - lenUsed);
+				rCtx.inbuflen += fillInBuf(rCtx,samples,lenUsed,length - lenUsed);
 				return outBytesWritten;
 			}
-			rCtx.inbuflen += fillInBuf(samples,lenUsed,toberead);
+			rCtx.inbuflen += fillInBuf(rCtx,samples,lenUsed,toberead);
 			lenUsed += toberead;
 
 			rCtx.sumread += toberead;
 
-			nsmplwrt = downSample();
+			nsmplwrt = downSample(rCtx);
 			rCtx.inbuflen = 0;
 			rCtx.rp += nsmplwrt * (rCtx.fs2 / rCtx.dfrq);
 			
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt);
 			rCtx.outBuffer.flip();
 
-			writeLen = writeOutBytes(nsmplwrt,dbps,outBytesWritten,isLast);
+			writeLen = writeOutBytes(rCtx,nsmplwrt,dbps,outBytesWritten,isLast);
 			if(writeLen < 0)
 				break;
 			outBytesWritten += writeLen;
@@ -1545,7 +1546,7 @@ public class JavaSSRC {
 		}
 		return outBytesWritten;
 	}
-	private int downsample(byte[] samples, int offset, int length, double gain, boolean isLast)
+	private static int downsample(ResampleContext rCtx, byte[] samples, int offset, int length, double gain, boolean isLast)
 	{
 		int nsmplread,nsmplwrt;
 		int writeLen = 0;
@@ -1560,16 +1561,16 @@ public class JavaSSRC {
 		if(length == 0 && rCtx.inBuffer.hasRemaining() && isLast){
 			nsmplread = rCtx.inBuffer.position()/(rCtx.bps*rCtx.rnch);
 			rCtx.inBuffer.flip();
-			fillInBuf(nsmplread);
+			fillInBuf(rCtx,nsmplread);
 			Arrays.fill(rCtx.inbuf, nsmplread*rCtx.nch, toberead*rCtx.nch, 0);
 			rCtx.inBuffer.clear();
 			rCtx.sumread += nsmplread;
-			nsmplwrt = downSample();
+			nsmplwrt = downSample(rCtx);
 			rCtx.rp += nsmplwrt * (rCtx.fs2 / rCtx.dfrq);
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt);
 			rCtx.outBuffer.flip();
-			return writeOutBytes(nsmplwrt,dbps,0,isLast);
+			return writeOutBytes(rCtx,nsmplwrt,dbps,0,isLast);
 		}
 		
 		int outBytesWritten = 0;
@@ -1588,19 +1589,19 @@ public class JavaSSRC {
 				return outBytesWritten;
 			
 			rCtx.inBuffer.flip();
-			fillInBuf(toberead);
+			fillInBuf(rCtx,toberead);
 			rCtx.inBuffer.clear();
 			
 			rCtx.sumread += toberead;
 
-			nsmplwrt = downSample();
+			nsmplwrt = downSample(rCtx);
 			rCtx.rp += nsmplwrt * (rCtx.fs2 / rCtx.dfrq);
 			
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt);
 			rCtx.outBuffer.flip();
 
-			writeLen = writeOutBytes(nsmplwrt,dbps,outBytesWritten,isLast);
+			writeLen = writeOutBytes(rCtx,nsmplwrt,dbps,outBytesWritten,isLast);
 			if(writeLen < 0)
 				break;
 			outBytesWritten += writeLen;
@@ -1664,20 +1665,20 @@ public class JavaSSRC {
 			}
 			rCtx.inBuffer.limit(nsmplread);
 			nsmplread /= rCtx.bps*rCtx.rnch;
-			fillInBuf(nsmplread);
+			fillInBuf(rCtx,nsmplread);
 			Arrays.fill(rCtx.inbuf, nsmplread*rCtx.nch, rCtx.nch*toberead, 0);
 
 			rCtx.sumread += nsmplread;
 			ending = EOF || rCtx.sumread >= chanklen;
 
-			nsmplwrt2 = downSample();
+			nsmplwrt2 = downSample(rCtx);
             
 			rCtx.rp += nsmplwrt2 * (rCtx.fs2 / rCtx.dfrq);
 			
 			rCtx.outBuffer.clear();
-			fillOutBuf(dbps, gain, nsmplwrt2);
+			fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
 			rCtx.outBuffer.flip();
-			if(writeOutStream(fpo, nsmplwrt2, dbps, ending))
+			if(writeOutStream(rCtx, fpo, nsmplwrt2, dbps, ending))
 				break;
 			
 			rCtx.ds = (rCtx.rp-1)/(rCtx.fs2/rCtx.fs1);
@@ -1695,7 +1696,7 @@ public class JavaSSRC {
 		showProgress(1);
 	}
 
-	private double readFromInBuffer(int i){
+	private static double readFromInBuffer(ResampleContext rCtx, int i){
 		switch(rCtx.bps) {
 		case 1:
 			return (1 / (double)0x7f) * (double)(((short)rCtx.inBuffer.get(i) & 0xff) - 128);
@@ -1713,7 +1714,7 @@ public class JavaSSRC {
 		return 0;
 	}
 	
-	private double intSampleToDouble(int sample){
+	private static double intSampleToDouble(ResampleContext rCtx, int sample){
 		switch(rCtx.bps) {
 		case 1:
 			return (1 / (double)0x7f) * (double)((sample & 0xff) - 128);
@@ -1726,23 +1727,23 @@ public class JavaSSRC {
 		};
 		return 0;
 	}
-	private void writeToOutBuffer(double f, int ch)
+	private static void writeToOutBuffer(ResampleContext rCtx, double f, int ch)
 	{
 		int s;
 		switch(rCtx.dbps) {
 		case 1:
 			f *= 0x7f;
-			s = rCtx.dither > 0? do_shaping(f,ch) : RINT(f);
+			s = rCtx.dither > 0? do_shaping(rCtx, f,ch) : RINT(f);
 			rCtx.outBuffer.put((byte) (s + 128));
 			break;
 		case 2:
 			f *= 0x7fff;
-			s = rCtx.dither > 0? do_shaping(f,ch) : RINT(f);
+			s = rCtx.dither > 0? do_shaping(rCtx, f,ch) : RINT(f);
 			rCtx.outBuffer.putShort((short)s);
 			break;
 		case 3:
 			f *= 0x7fffff;
-			s = rCtx.dither > 0? do_shaping(f,ch) : RINT(f);
+			s = rCtx.dither > 0? do_shaping(rCtx, f,ch) : RINT(f);
 			rCtx.outBuffer.putShort((short)s);
 			s >>= 16;
 			rCtx.outBuffer.put((byte)s);
@@ -1750,7 +1751,7 @@ public class JavaSSRC {
 		}
 	}
 
-	private void writeIntToBuffer(int sample, double gain)
+	private static void writeIntToBuffer(ResampleContext rCtx, int sample, double gain)
 	{
 		int s = (int)(sample * gain);
 		switch(rCtx.dbps) {
@@ -1768,7 +1769,7 @@ public class JavaSSRC {
 		}
 	}
 	
-	private int no_src(int[][] samples, int length, double gain)
+	private static int no_src(ResampleContext rCtx, int[][] samples, int length, double gain)
 	{
 		int i,ch;
 		double f = 0,p;
@@ -1787,7 +1788,7 @@ public class JavaSSRC {
 			if (rCtx.twopass) {
 				for(i=0;i<len;i++){
 					for(ch=0;ch<rCtx.nch;ch++){
-						f = intSampleToDouble(samples[ch%rCtx.nch][i]) * gain;
+						f = intSampleToDouble(rCtx, samples[ch%rCtx.nch][i]) * gain;
 						p = f > 0 ? f : -f;
 						rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
 						rCtx.outBuffer.putDouble(f);
@@ -1796,30 +1797,30 @@ public class JavaSSRC {
 			} else if(rCtx.dbps == rCtx.bps){
 				for(i=0;i<len;i++){
 					for(ch=0;ch<rCtx.dnch;ch++){
-						writeIntToBuffer(samples[ch%rCtx.nch][i],gain);
+						writeIntToBuffer(rCtx, samples[ch%rCtx.nch][i],gain);
 					}
 				}
 			} else {
 				for(i=0;i<len;i++){
 					for(ch=0;ch<rCtx.dnch;ch++){
-						f = intSampleToDouble(samples[ch%rCtx.nch][i]) * gain;
-						writeToOutBuffer(f,(ch%rCtx.nch));
+						f = intSampleToDouble(rCtx, samples[ch%rCtx.nch][i]) * gain;
+						writeToOutBuffer(rCtx, f,(ch%rCtx.nch));
 					}
 				}
 			}
 			rCtx.outBuffer.flip();
-			if(outBytes.length - outBytesWritten < rCtx.outBuffer.limit()){
+			if(rCtx.outBytes.length - outBytesWritten < rCtx.outBuffer.limit()){
 				byte[] tmpBytes = new byte[outBytesWritten + rCtx.outBuffer.limit()];
-				System.arraycopy(outBytes, 0, tmpBytes, 0, outBytesWritten);
-				outBytes = tmpBytes;
+				System.arraycopy(rCtx.outBytes, 0, tmpBytes, 0, outBytesWritten);
+				rCtx.outBytes = tmpBytes;
 			}
-			rCtx.outBuffer.get(outBytes, outBytesWritten, rCtx.outBuffer.limit());
+			rCtx.outBuffer.get(rCtx.outBytes, outBytesWritten, rCtx.outBuffer.limit());
 			outBytesWritten += rCtx.outBuffer.limit();
 		}
 		return outBytesWritten;
 	}
 	
-	private int no_src(byte[] samples, int offset, int length, double gain)
+	private static int no_src(ResampleContext rCtx, byte[] samples, int offset, int length, double gain)
 	{
 		int i,ch;
 		double f = 0,p;
@@ -1858,7 +1859,7 @@ public class JavaSSRC {
 			if (rCtx.twopass) {
 				for(i=0;i<rCtx.inBuffer.limit()-rCtx.bps*rCtx.rnch;i+=rCtx.bps*rCtx.rnch){
 						for(ch=0;ch<rCtx.nch;ch++){
-							f = readFromInBuffer(i+(ch+j)*rCtx.bps) * gain;
+							f = readFromInBuffer(rCtx, i+(ch+j)*rCtx.bps) * gain;
 							p = f > 0 ? f : -f;
 							rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
 							rCtx.outBuffer.putDouble(f);
@@ -1867,20 +1868,20 @@ public class JavaSSRC {
 			} else {
 				for(i=0;i<rCtx.inBuffer.limit()-rCtx.bps*rCtx.rnch;i+=rCtx.bps*rCtx.rnch){
 					for(ch=0;ch<rCtx.dnch;ch++){
-						f = readFromInBuffer(i+((ch%rCtx.nch)+j)*rCtx.bps) * gain;
-						writeToOutBuffer(f,(ch%rCtx.nch));
+						f = readFromInBuffer(rCtx, i+((ch%rCtx.nch)+j)*rCtx.bps) * gain;
+						writeToOutBuffer(rCtx, f,(ch%rCtx.nch));
 					}
 				}
 			}
 			rCtx.inBuffer.position(i);
 			rCtx.inBuffer.compact();
 			rCtx.outBuffer.flip();
-			if(outBytes.length - outBytesWritten < rCtx.outBuffer.limit()){
+			if(rCtx.outBytes.length - outBytesWritten < rCtx.outBuffer.limit()){
 				byte[] tmpBytes = new byte[outBytesWritten + rCtx.outBuffer.limit()];
-				System.arraycopy(outBytes, 0, tmpBytes, 0, outBytesWritten);
-				outBytes = tmpBytes;
+				System.arraycopy(rCtx.outBytes, 0, tmpBytes, 0, outBytesWritten);
+				rCtx.outBytes = tmpBytes;
 			}
-			rCtx.outBuffer.get(outBytes, outBytesWritten, rCtx.outBuffer.limit());
+			rCtx.outBuffer.get(rCtx.outBytes, outBytesWritten, rCtx.outBuffer.limit());
 			outBytesWritten += rCtx.outBuffer.limit();
 		}
 		return outBytesWritten;
@@ -1913,7 +1914,7 @@ public class JavaSSRC {
 
 			if (rCtx.twopass) {
 				for(ch=0;ch<rCtx.nch;ch++){
-					f = readFromInBuffer((ch+j)*rCtx.bps) * gain;
+					f = readFromInBuffer(rCtx, (ch+j)*rCtx.bps) * gain;
 					p = f > 0 ? f : -f;
 					rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
 					rCtx.outBuffer.putDouble(f);
@@ -1921,8 +1922,8 @@ public class JavaSSRC {
 				fpo.write(rCtx.rawoutbuf,0,8*rCtx.nch);
 			} else {
 				for(ch=0;ch<rCtx.dnch;ch++){
-					f = readFromInBuffer((ch%rCtx.nch+j)*rCtx.bps) * gain;
-					writeToOutBuffer(f,(ch%rCtx.nch));
+					f = readFromInBuffer(rCtx, (ch%rCtx.nch+j)*rCtx.bps) * gain;
+					writeToOutBuffer(rCtx,f,(ch%rCtx.nch));
 				}
 				fpo.write(rCtx.rawoutbuf,0,rCtx.dbps*rCtx.dnch);
 			}
@@ -1938,7 +1939,7 @@ public class JavaSSRC {
 
 	public void resetShaper()
 	{
-		randptr = 0;
+		rCtx.randptr = 0;
 	}
 	
 	public void doubleToIntSample(double d, int ch, ByteBuffer ob)
@@ -1946,15 +1947,15 @@ public class JavaSSRC {
 		int s;
 		switch(rCtx.dbps) {
 		case 1:
-			s = rCtx.dither > 0? do_shaping(d,ch) : RINT(d);
+			s = rCtx.dither > 0? do_shaping(rCtx,d,ch) : RINT(d);
 			ob.put((byte) (s + 128));
 			break;
 		case 2:
-			s = rCtx.dither > 0? do_shaping(d,ch) : RINT(d);
+			s = rCtx.dither > 0? do_shaping(rCtx,d,ch) : RINT(d);
 			ob.putShort((short) s);
 			break;
 		case 3:
-			s = rCtx.dither > 0? do_shaping(d,ch) : RINT(d);
+			s = rCtx.dither > 0? do_shaping(rCtx,d,ch) : RINT(d);
 			ob.putShort((short) s);
 			s >>= 16;
 			ob.put((byte)s);
@@ -1996,7 +1997,7 @@ public class JavaSSRC {
 		return 1;
 	}
 
-	public double dBToGain(double att)
+	public static double dBToGain(double att)
 	{
 		return Math.pow(10,att/20);
 	}
@@ -2006,11 +2007,11 @@ public class JavaSSRC {
 			throw new IllegalStateException("Resampler has not been initialized");
 
 		if (rCtx.sfrq < rCtx.dfrq)
-			return upsample(samples,length,rCtx.gain, isLast);
+			return upsample(rCtx,samples,length,rCtx.gain, isLast);
 		else if (rCtx.sfrq > rCtx.dfrq) 
-			return downsample(samples,length,rCtx.gain, isLast);
+			return downsample(rCtx,samples,length,rCtx.gain, isLast);
 		else
-			return no_src(samples,length,rCtx.gain);
+			return no_src(rCtx,samples,length,rCtx.gain);
 	}
 
 	public int resample(byte[] samples, int offset, int length, boolean isLast){
@@ -2018,11 +2019,11 @@ public class JavaSSRC {
 			throw new IllegalStateException("Resampler has not been initialized");
 
 		if (rCtx.sfrq < rCtx.dfrq)
-			return upsample(samples,offset,length,rCtx.gain, isLast);
+			return upsample(rCtx,samples,offset,length,rCtx.gain, isLast);
 		else if (rCtx.sfrq > rCtx.dfrq) 
-			return downsample(samples,offset,length,rCtx.gain, isLast);
+			return downsample(rCtx,samples,offset,length,rCtx.gain, isLast);
 		else 
-			return no_src(samples,offset,length,rCtx.gain);
+			return no_src(rCtx,samples,offset,length,rCtx.gain);
 	}
 	
 	public double resample(InputStream fpi, OutputStream fpo, long length) throws IOException{
