@@ -243,7 +243,7 @@ public class JavaSSRC {
 	}
 	public void setSrcBPS(int srcBPS) {
 		if (srcBPS != 8 && srcBPS != 16 && srcBPS != 24 && srcBPS != 32)
-			throw new IllegalArgumentException("Dst BPS type must be 8, 16, 24, or 32 bits");
+			throw new IllegalArgumentException("Src BPS type must be 8, 16, 24, or 32 bits");
 		this.srcBPS = srcBPS;
 	}
 
