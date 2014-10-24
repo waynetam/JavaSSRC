@@ -1,5 +1,12 @@
+/gradle
+/.idea
+*.properties
+
 bin
 *.wav
 *.aiff
 .classpath
 .settings
+*.iml
+gradlew
+gradlew.bat
