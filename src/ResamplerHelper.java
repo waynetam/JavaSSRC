@@ -144,7 +144,7 @@ public class ResamplerHelper{
 			BufferedOutputStream outStrm;
 			FileOutputStream fpt = null;
 			File file = null;
-			if(twoPass){ // Two Pass mode
+			if(javaSSRC.isTwoPass()){ // Two Pass mode
 				if (tmpFile != null) {
 					file = new File(tmpFile);
 				} else {

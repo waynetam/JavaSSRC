@@ -286,6 +286,11 @@ public class JavaSSRC {
 		this.noiseAmplitude = noiseAmplitude;
 	}
 
+	public boolean isTwoPass(){
+		if(rCtx != null)
+			return rCtx.twopass;
+		return this.twoPass;
+	}
 	public void setTwoPass(boolean twoPass) {
 		this.twoPass = twoPass;
 	}
@@ -839,7 +844,7 @@ public class JavaSSRC {
 							(double)(((int)rCtx.inBuffer.getShort(j) & 0xffff) | ((int)rCtx.inBuffer.get(j+2) << 24) >> 8);
 				}
 			}else{
-				for(int i=0;i<len;i++) {
+				for(int i=0;i<len;i++,j+=jCnt) {
 					rCtx.inbuf[offset+i] = (1/(double)0x7fffff)*
 							(double)((((int)rCtx.inBuffer.get(j) << 24) >> 8) | ((int)rCtx.inBuffer.getShort(j+1) & 0xffff));
 				}
