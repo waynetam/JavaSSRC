@@ -59,6 +59,7 @@ public class ResamplerHelper{
 	public static double attentuation,noiseAmp;
 	public static long length = 0;
 	public static int monoChannel = -1;
+	public static boolean isFloat = false;
 	
 	public static double processPCM(FileInputStream fpi, FileOutputStream fpo, JavaSSRC.ProgressListener listener) throws IOException
 	{
@@ -83,6 +84,9 @@ public class ResamplerHelper{
 		
 		javaSSRC.setSrcBPS(srcBPS*8); // Source bits per sample. 8, 16, 24, or 32
 		javaSSRC.setDstBPS(dstBPS*8); // Destination bits per sample. 8, 16, or 24
+		
+		// Output floating point PCM. When this is true, DstBPS is ignored
+		javaSSRC.setFloat(isFloat); 
 		
 		// Source & Destination sampling rates. 22050, 44100, 48000, etc...
 		// For upsampling:  src rate/gcd(src rate,dst rate) must be divisible by 2 or 3.
@@ -192,7 +196,6 @@ public class ResamplerHelper{
 			peak = javaSSRC.getPeak();
 			
 			if(file != null){  // Second pass
-				srcChannels = 1;
 				fpt.close();
 				listener.onShowMessage(String.format("\npeak : %gdB",20*Math.log10(peak)));
 
@@ -211,7 +214,7 @@ public class ResamplerHelper{
 					ByteBuffer bb = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN);
 					DoubleBuffer db = bb.asDoubleBuffer();
 					double f;
-
+					
 					for(;;)
 					{
 						try{
@@ -224,7 +227,7 @@ public class ResamplerHelper{
 						// Convert to destination number of channels here.
 						for(ch=0;ch<dstChannels;ch++){
 							f = db.get(ch%srcChannels) * gain;
-							javaSSRC.doubleToIntSample(f,ch%srcChannels,bb);
+							javaSSRC.doubleToBytes(f,ch%srcChannels,bb);
 						}
 						outStrm.write(bb.array(), 0, bb.position());
 						sumread++;
@@ -644,19 +647,23 @@ public class ResamplerHelper{
 		return 0;
 	}
 
-	public static void writeWavHeader(FileOutputStream fpo) throws IOException{
+	public static void writeWavHeader(FileOutputStream fpo, boolean isFloat) throws IOException{
+		int outBPS = isFloat?4:dstBPS;
 		ByteBuffer bb = ByteBuffer.wrap(new byte[44]).order(ByteOrder.LITTLE_ENDIAN);
 		bb.put("RIFF".getBytes());
 		bb.putInt(0);
 
 		bb.put("WAVEfmt ".getBytes());
 		bb.putInt(16);
-		bb.putShort((short)1); // PCM
+		if(isFloat)
+			bb.putShort((short)3); // floating point PCM.
+		else
+			bb.putShort((short)1); // PCM
 		bb.putShort((short) dstChannels); // Channels
 		bb.putInt(dstSamplingRate); // Sampling rate 
-		bb.putInt(dstSamplingRate*dstChannels*dstBPS); // Bytes per sec
-		bb.putShort((short) (dstBPS*dstChannels));// Block alignment
-		bb.putShort((short) (dstBPS*8)); // Bits per sample
+		bb.putInt(dstSamplingRate*dstChannels*outBPS); // Bytes per sec
+		bb.putShort((short) (outBPS*dstChannels));// Block alignment
+		bb.putShort((short) (outBPS*8)); // Bits per sample
 
 		bb.put("data".getBytes());
 		bb.putInt(0);

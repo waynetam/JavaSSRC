@@ -43,6 +43,7 @@ public class Resample implements JavaSSRC.ProgressListener
 		System.out.println("          --twoPass                  two pass processing to avoid clipping");
 		System.out.println("          --normalize                normalize the wave file");
 		System.out.println("          --quiet                    nothing displayed except error");
+		System.out.println("          --float                    floating point pcm output");
 		System.out.println("          --dither [<type>]          dithering");
 		System.out.println("                                       0 : no dither");
 		System.out.println("                                       1 : no noise shaping");
@@ -111,6 +112,11 @@ public class Resample implements JavaSSRC.ProgressListener
 				continue;
 			}
 
+			if ("--float".equals(argv[i])) {
+				ResamplerHelper.isFloat = true;
+				continue;
+			}
+			
 			if ("--normalize".equals(argv[i])) {
 				ResamplerHelper.twoPass = true;
 				ResamplerHelper.normalize = true;
@@ -200,7 +206,10 @@ public class Resample implements JavaSSRC.ProgressListener
 		};
 		System.out.println(String.format("frequency : %d -> %d",ResamplerHelper.srcSamplingRate,ResamplerHelper.dstSamplingRate));
 		System.out.println(String.format("attenuation : %gdB",ResamplerHelper.attentuation));
-		System.out.println(String.format("bits per sample : %d -> %d",ResamplerHelper.srcBPS*8,ResamplerHelper.dstBPS*8));
+		if(ResamplerHelper.isFloat)
+			System.out.println(String.format("bits per sample : %d -> float",ResamplerHelper.srcBPS*8));
+		else
+			System.out.println(String.format("bits per sample : %d -> %d",ResamplerHelper.srcBPS*8,ResamplerHelper.dstBPS*8));
 		System.out.println(String.format("channels : %d -> %d",ResamplerHelper.srcChannels,ResamplerHelper.dstChannels));
 		if(ResamplerHelper.monoChannel > -1)
 			System.out.println(String.format("mono channel : %d",ResamplerHelper.monoChannel + 1));
@@ -316,7 +325,7 @@ public class Resample implements JavaSSRC.ProgressListener
 
 			try{
 				fpo = new FileOutputStream(ResamplerHelper.destFile);
-				ResamplerHelper.writeWavHeader(fpo);
+				ResamplerHelper.writeWavHeader(fpo, ResamplerHelper.isFloat);
 			}catch(Exception e){
 				System.err.println("error writing output header.");
 				e.printStackTrace(System.err);
