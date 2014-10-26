@@ -256,6 +256,7 @@ public class Resample implements JavaSSRC.ProgressListener
 			System.out.flush();
 			
 			if(progress == 1){
+				System.out.println(String.format("Total Time %7.3fsec                 ",(float)t/1000));
 				setStartTime();
 			}
 		}
