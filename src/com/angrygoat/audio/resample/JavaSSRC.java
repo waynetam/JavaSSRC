@@ -1613,13 +1613,13 @@ public class JavaSSRC {
 		int dbps = rCtx.twopass?8:rCtx.isfloat?4:rCtx.dbps;
 		int toberead = ((rCtx.nb2-rCtx.rps-1)/rCtx.osf+1);
 		
-		if(rCtx.inBuffer.position() + length < toberead*rCtx.bps*rCtx.rnch && !isLast){
+		if(rCtx.inBuffer.position() + length < toberead*rCtx.bpf && !isLast){
 			rCtx.inBuffer.put(samples, offset, length);
 			return 0;
 		}
 
 		if(length == 0 && rCtx.inBuffer.hasRemaining() && isLast){
-			nsmplread = rCtx.inBuffer.position()/(rCtx.bps*rCtx.rnch);
+			nsmplread = rCtx.inBuffer.position()/(rCtx.bpf);
 			rCtx.inBuffer.flip();
 			fillInBuf(rCtx,nsmplread);
 			Arrays.fill(rCtx.inbuf, nsmplread*rCtx.nch, toberead*rCtx.nch, 0);
