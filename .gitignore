@@ -10,3 +10,4 @@ bin
 *.iml
 gradlew
 gradlew.bat
+/nbproject/private/

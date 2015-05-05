@@ -99,7 +99,7 @@ public class JavaSSRC {
 		return ((x) >= 0 ? ((int)((x) + 0.5)) : ((int)((x) - 0.5)));
 	}
 
-	private static double[] noiseAmpPresets = new double[]{0.7,0.9,0.18};
+	private static final double[] noiseAmpPresets = new double[]{0.7,0.9,0.18};
 
 	private static final int POOLSIZE = 97;
 
@@ -490,6 +490,7 @@ public class JavaSSRC {
 			listener.onShowMessage(msg);
 	}
 
+        @SuppressWarnings("empty-statement")
 	private static void initUpSample(ResampleContext rCtx){
 		int filter2len = rCtx.FFTFIRLEN; /* stage 2 filter length */
 
@@ -691,7 +692,7 @@ public class JavaSSRC {
 			alp = alpha(rCtx);
 			iza = I0Bessel.value(alp);
 
-			rCtx.ny = rCtx.fs2/rCtx.fs1; // 0¤Ç¤Ê¤¤¥µ¥ó¥×¥ë¤¬fs2¤Ç²¿¥µ¥ó¥×¥ë¤ª¤­¤Ë¤¢¤ë¤«¡©
+			rCtx.ny = rCtx.fs2/rCtx.fs1; // 0ï¿½Ç¤Ê¤ï¿½ï¿½ï¿½ï¿½ï¿½×¥ë¤¬fs2ï¿½Ç²ï¿½ï¿½ï¿½ï¿½ï¿½×¥ë¤ªï¿½ï¿½ï¿½Ë¤ï¿½ï¿½ë¤«ï¿½ï¿½
 			rCtx.nx = rCtx.n2/rCtx.ny+1;
 
 			rCtx.fOrder = new int[rCtx.ny];
@@ -1319,7 +1320,7 @@ public class JavaSSRC {
 
 	private static int upsample(ResampleContext rCtx, int[][] samples, int length, double gain, boolean isLast){
 		int nsmplwrt1,nsmplwrt2;
-		int writeLen = 0;
+		int writeLen;
 		int dbps = rCtx.twopass?8:rCtx.isfloat?4:rCtx.dbps;
 		int tobereadbase = (int)Math.floor((double)rCtx.nb2*rCtx.sfrq/(rCtx.dfrq*rCtx.osf))+1+rCtx.nx;
 		int toberead = tobereadbase-rCtx.inbuflen;
@@ -1386,7 +1387,7 @@ public class JavaSSRC {
 	
 	private static int upsample(ResampleContext rCtx, byte[] samples, int offset, int length, double gain, boolean isLast){
 		int nsmplread,nsmplwrt1,nsmplwrt2;
-		int writeLen = 0;
+		int writeLen;
 		int dbps = rCtx.twopass?8:rCtx.isfloat?4:rCtx.dbps;
 		int tobereadbase = (int)Math.floor((double)rCtx.nb2*rCtx.sfrq/(rCtx.dfrq*rCtx.osf))+1+rCtx.nx;
 		int toberead = tobereadbase-rCtx.inbuflen;
@@ -1470,10 +1471,10 @@ public class JavaSSRC {
 	private void upsample(InputStream fpi,OutputStream fpo,double gain,long length) throws IOException
 	{
 		int spcount = 0;
-		boolean ending = false;
+		boolean ending;
 		int nsmplread,toberead,toberead2,tmpLen,readLen,nsmplwrt1;
 		boolean EOF = false;
-		int nsmplwrt2 = 0;
+		int nsmplwrt2;
 		int dbps = rCtx.twopass?8:rCtx.isfloat?4:rCtx.dbps;
 		long chanklen = length/rCtx.bps/rCtx.rnch;
 		int tobereadbase = (int)Math.floor((double)rCtx.nb2*rCtx.sfrq/(rCtx.dfrq*rCtx.osf))+1+rCtx.nx;
@@ -1497,7 +1498,7 @@ public class JavaSSRC {
 					else
 						nsmplread += tmpLen;
 				}
-			}catch(Exception e){
+			}catch(IOException e){
 				EOF = true;
 			}
 			rCtx.inBuffer.limit(nsmplread);
@@ -1538,7 +1539,7 @@ public class JavaSSRC {
 	private static int downsample(ResampleContext rCtx, int[][] samples, int length, double gain, boolean isLast)
 	{
 		int nsmplwrt;
-		int writeLen = 0;
+		int writeLen;
 		int dbps = rCtx.twopass?8:rCtx.isfloat?4:rCtx.dbps;
 		int toberead = ((rCtx.nb2-rCtx.rps-1)/rCtx.osf+1);
 		
@@ -1609,7 +1610,7 @@ public class JavaSSRC {
 	private static int downsample(ResampleContext rCtx, byte[] samples, int offset, int length, double gain, boolean isLast)
 	{
 		int nsmplread,nsmplwrt;
-		int writeLen = 0;
+		int writeLen;
 		int dbps = rCtx.twopass?8:rCtx.isfloat?4:rCtx.dbps;
 		int toberead = ((rCtx.nb2-rCtx.rps-1)/rCtx.osf+1);
 		
@@ -1688,13 +1689,11 @@ public class JavaSSRC {
 	private void downsample(InputStream fpi,OutputStream fpo, double gain, long length) throws IOException
 	{
 		int spcount = 0;
-		int nsmplwrt2 = 0; 
+		int nsmplwrt2; 
 		boolean ending;
 		int ch;
 		int dbps = rCtx.twopass?8:rCtx.isfloat?4:rCtx.dbps;
 		long chanklen = length/rCtx.bps/rCtx.rnch;
-
-		ending = false;
 
 		rCtx.sumread = rCtx.sumwrite = 0;
 
@@ -1719,7 +1718,7 @@ public class JavaSSRC {
 					else
 						nsmplread += tmpLen;
 				}
-			}catch(Exception e){
+			}catch(IOException e){
 				EOF = true;
 			}
 			rCtx.inBuffer.limit(nsmplread);
@@ -1769,7 +1768,7 @@ public class JavaSSRC {
 			}
 		case 4:
 			return NORMALIZE_FACTOR_32 * (double)rCtx.inBuffer.getInt(i); 
-		};
+		}
 		return 0;
 	}
 	
@@ -1783,7 +1782,7 @@ public class JavaSSRC {
 			return NORMALIZE_FACTOR_24 * sample;
 		case 4:
 			return NORMALIZE_FACTOR_32 * sample; 
-		};
+		}
 		return 0;
 	}
 	private static void writeToOutBuffer(ResampleContext rCtx, double f, int ch)
@@ -1835,7 +1834,7 @@ public class JavaSSRC {
 	private static int no_src(ResampleContext rCtx, int[][] samples, int length, double gain)
 	{
 		int i,ch;
-		double f = 0,p;
+		double f,p;
 		int len;
 		
 		int outBytesWritten = 0;
@@ -1886,7 +1885,7 @@ public class JavaSSRC {
 	private static int no_src(ResampleContext rCtx, byte[] samples, int offset, int length, double gain)
 	{
 		int i,ch;
-		double f = 0,p;
+		double f,p;
 		int len = length;
 
 		if(len >= rCtx.inBuffer.remaining())
@@ -1952,8 +1951,8 @@ public class JavaSSRC {
 	
 	private void no_src(InputStream fpi, OutputStream fpo,double gain,long length) throws IOException
 	{
-		int ch=0,sumread=0,readLen,tmpLen;
-		double f = 0,p;
+		int ch,sumread=0,readLen,tmpLen;
+		double f,p;
 		long chunklen = length/rCtx.bps/rCtx.rnch;
 		int j = 0;
 		if(rCtx.nch == 1 && rCtx.rnch != rCtx.nch)
@@ -1963,7 +1962,6 @@ public class JavaSSRC {
 		{
 			try{
 				rCtx.inBuffer.clear();
-				f = 0;
 				readLen = 0;
 				while(readLen < rCtx.bps*rCtx.rnch){
 					tmpLen = fpi.read(rCtx.rawinbuf, readLen, rCtx.bps*rCtx.rnch - readLen);
@@ -2135,13 +2133,13 @@ public class JavaSSRC {
 
 			showMessage("\nPass 2");
 			
-			double gain = calcSecondPassGain();
+			double secondPassGain = calcSecondPassGain();
 
 			resetShaper();
 
 			long fptlen = tmpFile.length() / (8 * rCtx.nch);
 			int sumread = 0;
-			int ch = 0;
+			int ch;
 			DataInputStream inStrm = null;
 			BufferedOutputStream outStrm = null;
 			try {
@@ -2161,7 +2159,7 @@ public class JavaSSRC {
 					}
 					bb.clear();
 					for(ch=0;ch<rCtx.dnch;ch++){
-						f = db.get(ch%rCtx.nch) * gain;
+						f = db.get(ch%rCtx.nch) * secondPassGain;
 						doubleToBytes(f,ch%rCtx.nch,bb);
 					}
 					outStrm.write(bb.array(), 0, bb.position());
@@ -2178,18 +2176,16 @@ public class JavaSSRC {
 				try{
 					if(outStrm != null)
 						outStrm.flush();
-				}catch(Exception e){}
+				}catch(IOException e){}
 				try{
 					if(inStrm != null)
 						inStrm.close();
-				}catch(Exception e){}
-				if (tmpFile != null) {
-					try{
-						tmpFile.delete();
-					}catch(Exception e){
-						showMessage(String.format("Failed to delete temp file %s",rCtx.tmpFn));
-					}
-				}
+				}catch(IOException e){}
+                                try{
+                                        tmpFile.delete();
+                                }catch(Exception e){
+                                        showMessage(String.format("Failed to delete temp file %s",rCtx.tmpFn));
+                                }
 			}
 		}else{
 			BufferedOutputStream outStrm = new BufferedOutputStream(fpo);
