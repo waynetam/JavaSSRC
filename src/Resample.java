@@ -33,7 +33,7 @@ public class Resample implements JavaSSRC.ProgressListener
 	private void usage()
 	{
 		System.out.println("http://shibatch.sourceforge.net/\n");
-		System.out.println("usage: ssrc [<options>] <source wav file> <destination wav file>");
+		System.out.println("usage: java Resample [<options>] <source wav file> <destination wav file>");
 		System.out.println("options : --rate <sampling rate>     output sample rate");
 		System.out.println("          --attentuation <attenuation(dB)>    attenuate signal");
 		System.out.println("          --bits <number of bits>    output quantization bit length");
