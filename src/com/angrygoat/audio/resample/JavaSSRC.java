@@ -24,6 +24,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.DoubleBuffer;
@@ -33,6 +34,7 @@ import java.util.Random;
 import vavi.util.I0Bessel;
 import vavi.util.SplitRadixFft;
 
+@SuppressWarnings("unused")
 public class JavaSSRC {
 
     public interface ProgressListener {
@@ -366,11 +368,7 @@ public class JavaSSRC {
         rCtx.pdf = pdfType;
         rCtx.noiseamp = noiseAmplitude;
         rCtx.normalize = normalize;
-        if (rCtx.sfrq == rCtx.dfrq && rCtx.dither == 0 && rCtx.gain == 1) {
-            rCtx.twopass = false;
-        } else {
-            rCtx.twopass = rCtx.normalize || twoPass;
-        }
+        rCtx.twopass = !(rCtx.sfrq == rCtx.dfrq && rCtx.dither == 0 && rCtx.gain == 1) && (rCtx.normalize || twoPass);
         rCtx.tmpFn = tempFilename;
         if (fast) {
             rCtx.AA = 96;
@@ -918,6 +916,15 @@ public class JavaSSRC {
         return x;
     }
 
+    private static int fillInBuf(ResampleContext rCtx, float[][] samples, int offset, int length) {
+        int ibOffset = rCtx.nch * rCtx.inbuflen;
+        int len = length * rCtx.nch;
+        for (int i = 0; i < len; i++) {
+            rCtx.inbuf[ibOffset + i] = samples[i % rCtx.nch][offset + i / rCtx.nch];
+        }
+        return length;
+    }
+
     private static int fillInBuf(ResampleContext rCtx, int[][] samples, int offset, int length) {
         int ibOffset = rCtx.nch * rCtx.inbuflen;
         int len = length * rCtx.nch;
@@ -1416,6 +1423,200 @@ public class JavaSSRC {
         return nsmplwrt2;
     }
 
+    /*
+     * float[][] input
+     * Duplicated the int[][] version instead of generalizing it to minimize branching within the loop.
+     */
+    private static int upsample(ResampleContext rCtx, float[][] samples, int length, double gain, boolean isLast) {
+        int nsmplwrt1, nsmplwrt2;
+        int writeLen;
+        int dbps = rCtx.twopass ? 8 : rCtx.dstFloat ? 4 : rCtx.dbps;
+        int tobereadbase = (int) Math.floor((double) rCtx.nb2 * rCtx.sfrq / (rCtx.dfrq * rCtx.osf)) + 1 + rCtx.nx;
+        int toberead = tobereadbase - rCtx.inbuflen;
+
+        if (length < toberead && !isLast) {
+            rCtx.inbuflen += fillInBuf(rCtx, samples, 0, length);
+            return 0;
+        }
+
+        if (length == 0 && rCtx.inbuflen > 0 && isLast) {
+            rCtx.sumread += rCtx.inbuflen;
+            nsmplwrt1 = rCtx.nb2;
+            rCtx.ip = ((rCtx.sfrq * (rCtx.rp - 1) + rCtx.fs1) / rCtx.fs1) * rCtx.nch;
+            nsmplwrt2 = upSample(rCtx, nsmplwrt1);
+            rCtx.rp += nsmplwrt1 * rCtx.sfrqfrqgcd / rCtx.osf;
+            rCtx.outBuffer.clear();
+            fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
+            rCtx.outBuffer.flip();
+            return writeOutBytes(rCtx, nsmplwrt2, dbps, 0, true);
+        }
+
+        int outBytesWritten = 0;
+        int lenUsed = 0;
+
+        while (lenUsed < length) {
+            toberead = tobereadbase - rCtx.inbuflen;
+
+            if (length - lenUsed < toberead && !isLast) {
+                rCtx.inbuflen += fillInBuf(rCtx, samples, lenUsed, length - lenUsed);
+                return outBytesWritten;
+            }
+            rCtx.inbuflen += fillInBuf(rCtx, samples, lenUsed, toberead);
+            lenUsed += toberead;
+            rCtx.sumread += toberead;
+
+            nsmplwrt1 = rCtx.nb2;
+
+            rCtx.ip = ((rCtx.sfrq * (rCtx.rp - 1) + rCtx.fs1) / rCtx.fs1) * rCtx.nch;
+
+            nsmplwrt2 = upSample(rCtx, nsmplwrt1);
+
+            rCtx.rp += nsmplwrt1 * rCtx.sfrqfrqgcd / rCtx.osf;
+
+            rCtx.outBuffer.clear();
+            fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
+            rCtx.outBuffer.flip();
+
+            writeLen = writeOutBytes(rCtx, nsmplwrt2, dbps, outBytesWritten, isLast);
+            if (writeLen < 0) {
+                break;
+            }
+            outBytesWritten += writeLen;
+
+            rCtx.sumwrite += writeLen / rCtx.wbpf;
+
+            rCtx.ds = (rCtx.rp - 1) / rCtx.fs1sfrq;
+
+            System.arraycopy(rCtx.inbuf, rCtx.nch * rCtx.ds, rCtx.inbuf, 0, rCtx.nch * (rCtx.inbuflen - rCtx.ds));
+
+            rCtx.inbuflen -= rCtx.ds;
+            rCtx.rp -= rCtx.ds * rCtx.fs1sfrq;
+        }
+        return outBytesWritten;
+    }
+
+    private static int downsample(ResampleContext rCtx, float[][] samples, int length, double gain, boolean isLast) {
+        int nsmplwrt;
+        int writeLen;
+        int dbps = rCtx.twopass ? 8 : rCtx.dstFloat ? 4 : rCtx.dbps;
+        int toberead = ((rCtx.nb2 - rCtx.rps - 1) / rCtx.osf + 1);
+
+        if (rCtx.inbuflen + length < toberead && !isLast) {
+            rCtx.inbuflen += fillInBuf(rCtx, samples, 0, length);
+            return 0;
+        }
+
+        if (length == 0 && rCtx.inbuflen > 0 && isLast) {
+            Arrays.fill(rCtx.inbuf, rCtx.inbuflen * rCtx.nch, toberead * rCtx.nch, 0);
+            rCtx.sumread += rCtx.inbuflen;
+            nsmplwrt = downSample(rCtx);
+            rCtx.inbuflen = 0;
+            rCtx.rp += nsmplwrt * (rCtx.fs2 / rCtx.dfrq);
+            rCtx.outBuffer.clear();
+            fillOutBuf(rCtx, dbps, gain, nsmplwrt);
+            rCtx.outBuffer.flip();
+            return writeOutBytes(rCtx, nsmplwrt, dbps, 0, true);
+        }
+
+        int outBytesWritten = 0;
+        int lenUsed = 0;
+
+        while (lenUsed < length) {
+            toberead = ((rCtx.nb2 - rCtx.rps - 1) / rCtx.osf + 1) - rCtx.inbuflen;
+
+            if (length - lenUsed < toberead && !isLast) {
+                rCtx.inbuflen += fillInBuf(rCtx, samples, lenUsed, length - lenUsed);
+                return outBytesWritten;
+            }
+            rCtx.inbuflen += fillInBuf(rCtx, samples, lenUsed, toberead);
+            lenUsed += toberead;
+
+            rCtx.sumread += toberead;
+
+            nsmplwrt = downSample(rCtx);
+            rCtx.inbuflen = 0;
+            rCtx.rp += nsmplwrt * rCtx.fs2dfrq;
+
+            rCtx.outBuffer.clear();
+            fillOutBuf(rCtx, dbps, gain, nsmplwrt);
+            rCtx.outBuffer.flip();
+
+            writeLen = writeOutBytes(rCtx, nsmplwrt, dbps, outBytesWritten, isLast);
+            if (writeLen < 0) {
+                break;
+            }
+            outBytesWritten += writeLen;
+
+            rCtx.sumwrite += writeLen / rCtx.wbpf;
+
+            rCtx.ds = (rCtx.rp - 1) / rCtx.fs2fs1;
+
+            if (rCtx.ds > rCtx.nb2) {
+                rCtx.ds = rCtx.nb2;
+            }
+
+            int ch;
+            for (ch = 0; ch < rCtx.nch; ch++) {
+                System.arraycopy(rCtx.buf2[ch], rCtx.ds, rCtx.buf2[ch], 0, rCtx.nx + 1 + rCtx.nb2 - rCtx.ds);
+            }
+
+            rCtx.rp -= rCtx.ds * rCtx.fs2fs1;
+
+            for (ch = 0; ch < rCtx.nch; ch++) {
+                System.arraycopy(rCtx.buf1[ch], rCtx.nb2, rCtx.buf2[ch], rCtx.nx + 1, rCtx.nb2);
+            }
+
+        }
+        return outBytesWritten;
+    }
+
+    private static int no_src(ResampleContext rCtx, float[][] samples, int length, double gain) {
+        int i, ch;
+        double f, p;
+        int len;
+
+        int outBytesWritten = 0;
+        int lenUsed = 0;
+
+        while (lenUsed < length) {
+            len = length - lenUsed;
+            rCtx.outBuffer.clear();
+            if (len > rCtx.outBuffer.limit() / rCtx.nch) {
+                len = rCtx.outBuffer.limit() / rCtx.nch;
+            }
+            lenUsed += len;
+
+            if (rCtx.twopass) {
+                for (i = 0; i < len; i++) {
+                    for (ch = 0; ch < rCtx.nch; ch++) {
+                        f = samples[ch % rCtx.nch][i] * gain;
+                        p = f > 0 ? f : -f;
+                        rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
+                        rCtx.outBuffer.putDouble(f);
+                    }
+                }
+            } else {
+                for (i = 0; i < len; i++) {
+                    for (ch = 0; ch < rCtx.dnch; ch++) {
+                        f = samples[ch % rCtx.nch][i] * gain;
+                        writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
+                    }
+                }
+            }
+            rCtx.outBuffer.flip();
+            if (rCtx.outBytes.length - outBytesWritten < rCtx.outBuffer.limit()) {
+                byte[] tmpBytes = new byte[outBytesWritten + rCtx.outBuffer.limit()];
+                System.arraycopy(rCtx.outBytes, 0, tmpBytes, 0, outBytesWritten);
+                rCtx.outBytes = tmpBytes;
+            }
+            rCtx.outBuffer.get(rCtx.outBytes, outBytesWritten, rCtx.outBuffer.limit());
+            outBytesWritten += rCtx.outBuffer.limit();
+        }
+        return outBytesWritten;
+    }
+    /* end float[][] input */
+
+    /* int[][] input */
     private static int upsample(ResampleContext rCtx, int[][] samples, int length, double gain, boolean isLast) {
         int nsmplwrt1, nsmplwrt2;
         int writeLen;
@@ -1484,6 +1685,134 @@ public class JavaSSRC {
         return outBytesWritten;
     }
 
+    private static int downsample(ResampleContext rCtx, int[][] samples, int length, double gain, boolean isLast) {
+        int nsmplwrt;
+        int writeLen;
+        int dbps = rCtx.twopass ? 8 : rCtx.dstFloat ? 4 : rCtx.dbps;
+        int toberead = ((rCtx.nb2 - rCtx.rps - 1) / rCtx.osf + 1);
+
+        if (rCtx.inbuflen + length < toberead && !isLast) {
+            rCtx.inbuflen += fillInBuf(rCtx, samples, 0, length);
+            return 0;
+        }
+
+        if (length == 0 && rCtx.inbuflen > 0 && isLast) {
+            Arrays.fill(rCtx.inbuf, rCtx.inbuflen * rCtx.nch, toberead * rCtx.nch, 0);
+            rCtx.sumread += rCtx.inbuflen;
+            nsmplwrt = downSample(rCtx);
+            rCtx.inbuflen = 0;
+            rCtx.rp += nsmplwrt * (rCtx.fs2 / rCtx.dfrq);
+            rCtx.outBuffer.clear();
+            fillOutBuf(rCtx, dbps, gain, nsmplwrt);
+            rCtx.outBuffer.flip();
+            return writeOutBytes(rCtx, nsmplwrt, dbps, 0, true);
+        }
+
+        int outBytesWritten = 0;
+        int lenUsed = 0;
+
+        while (lenUsed < length) {
+            toberead = ((rCtx.nb2 - rCtx.rps - 1) / rCtx.osf + 1) - rCtx.inbuflen;
+
+            if (length - lenUsed < toberead && !isLast) {
+                rCtx.inbuflen += fillInBuf(rCtx, samples, lenUsed, length - lenUsed);
+                return outBytesWritten;
+            }
+            rCtx.inbuflen += fillInBuf(rCtx, samples, lenUsed, toberead);
+            lenUsed += toberead;
+
+            rCtx.sumread += toberead;
+
+            nsmplwrt = downSample(rCtx);
+            rCtx.inbuflen = 0;
+            rCtx.rp += nsmplwrt * rCtx.fs2dfrq;
+
+            rCtx.outBuffer.clear();
+            fillOutBuf(rCtx, dbps, gain, nsmplwrt);
+            rCtx.outBuffer.flip();
+
+            writeLen = writeOutBytes(rCtx, nsmplwrt, dbps, outBytesWritten, isLast);
+            if (writeLen < 0) {
+                break;
+            }
+            outBytesWritten += writeLen;
+
+            rCtx.sumwrite += writeLen / rCtx.wbpf;
+
+            rCtx.ds = (rCtx.rp - 1) / rCtx.fs2fs1;
+
+            if (rCtx.ds > rCtx.nb2) {
+                rCtx.ds = rCtx.nb2;
+            }
+
+            int ch;
+            for (ch = 0; ch < rCtx.nch; ch++) {
+                System.arraycopy(rCtx.buf2[ch], rCtx.ds, rCtx.buf2[ch], 0, rCtx.nx + 1 + rCtx.nb2 - rCtx.ds);
+            }
+
+            rCtx.rp -= rCtx.ds * rCtx.fs2fs1;
+
+            for (ch = 0; ch < rCtx.nch; ch++) {
+                System.arraycopy(rCtx.buf1[ch], rCtx.nb2, rCtx.buf2[ch], rCtx.nx + 1, rCtx.nb2);
+            }
+
+        }
+        return outBytesWritten;
+    }
+
+    private static int no_src(ResampleContext rCtx, int[][] samples, int length, double gain) {
+        int i, ch;
+        double f, p;
+        int len;
+
+        int outBytesWritten = 0;
+        int lenUsed = 0;
+
+        while (lenUsed < length) {
+            len = length - lenUsed;
+            rCtx.outBuffer.clear();
+            if (len > rCtx.outBuffer.limit() / rCtx.nch) {
+                len = rCtx.outBuffer.limit() / rCtx.nch;
+            }
+            lenUsed += len;
+
+            if (rCtx.twopass) {
+                for (i = 0; i < len; i++) {
+                    for (ch = 0; ch < rCtx.nch; ch++) {
+                        f = intSampleToDouble(rCtx, samples[ch % rCtx.nch][i]) * gain;
+                        p = f > 0 ? f : -f;
+                        rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
+                        rCtx.outBuffer.putDouble(f);
+                    }
+                }
+            } else if (rCtx.dbps == rCtx.bps && !rCtx.dstFloat) {
+                for (i = 0; i < len; i++) {
+                    for (ch = 0; ch < rCtx.dnch; ch++) {
+                        writeIntToBuffer(rCtx, samples[ch % rCtx.nch][i], gain);
+                    }
+                }
+            } else {
+                for (i = 0; i < len; i++) {
+                    for (ch = 0; ch < rCtx.dnch; ch++) {
+                        f = intSampleToDouble(rCtx, samples[ch % rCtx.nch][i]) * gain;
+                        writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
+                    }
+                }
+            }
+            rCtx.outBuffer.flip();
+            if (rCtx.outBytes.length - outBytesWritten < rCtx.outBuffer.limit()) {
+                byte[] tmpBytes = new byte[outBytesWritten + rCtx.outBuffer.limit()];
+                System.arraycopy(rCtx.outBytes, 0, tmpBytes, 0, outBytesWritten);
+                rCtx.outBytes = tmpBytes;
+            }
+            rCtx.outBuffer.get(rCtx.outBytes, outBytesWritten, rCtx.outBuffer.limit());
+            outBytesWritten += rCtx.outBuffer.limit();
+        }
+        return outBytesWritten;
+    }
+    /* end int[][] input */
+
+    /* byte[] input */
     private static int upsample(ResampleContext rCtx, byte[] samples, int offset, int length, double gain, boolean isLast) {
         int nsmplread, nsmplwrt1, nsmplwrt2;
         int writeLen;
@@ -1565,151 +1894,6 @@ public class JavaSSRC {
 
             rCtx.inbuflen -= rCtx.ds;
             rCtx.rp -= rCtx.ds * rCtx.fs1sfrq;
-        }
-        return outBytesWritten;
-    }
-
-    private void upsample(InputStream fpi, OutputStream fpo, double gain, long length) throws IOException {
-        int spcount = 0;
-        boolean ending;
-        int nsmplread, toberead, toberead2, tmpLen, readLen, nsmplwrt1;
-        boolean EOF = false;
-        int nsmplwrt2;
-        int dbps = rCtx.twopass ? 8 : rCtx.dstFloat ? 4 : rCtx.dbps;
-        long chanklen = length / rCtx.bps / rCtx.rnch;
-        int tobereadbase = (int) Math.floor((double) rCtx.nb2 * rCtx.sfrq / (rCtx.dfrq * rCtx.osf)) + 1 + rCtx.nx;
-        rCtx.sumread = rCtx.sumwrite = 0;
-
-        for (;;) {
-            toberead2 = toberead = tobereadbase - rCtx.inbuflen;
-            if (toberead + rCtx.sumread > chanklen) {
-                toberead = (int) (chanklen - rCtx.sumread);
-            }
-
-            rCtx.inBuffer.clear();
-            nsmplread = 0;
-            readLen = rCtx.bpf * toberead;
-            try {
-                while (nsmplread < readLen && !EOF) {
-                    tmpLen = fpi.read(rCtx.rawinbuf, nsmplread, readLen - nsmplread);
-                    if (tmpLen < 0) {
-                        EOF = true;
-                    } else {
-                        nsmplread += tmpLen;
-                    }
-                }
-            } catch (IOException e) {
-                EOF = true;
-            }
-            rCtx.inBuffer.limit(nsmplread);
-            nsmplread /= rCtx.bpf;
-            fillInBuf(rCtx, nsmplread);
-            Arrays.fill(rCtx.inbuf, rCtx.nch * rCtx.inbuflen + nsmplread * rCtx.nch, rCtx.nch * rCtx.inbuflen + rCtx.nch * toberead2, 0);
-
-            rCtx.inbuflen += toberead2;
-
-            rCtx.sumread += nsmplread;
-            ending = EOF || rCtx.sumread >= chanklen;
-
-            //nsmplwrt1 = ((rp-1)*srcSamplingRate/fs1+inbuflen-n1x)*dstSamplingRate*osf/srcSamplingRate;
-            //if (nsmplwrt1 > n2b2) nsmplwrt1 = n2b2;
-            nsmplwrt1 = rCtx.nb2;
-
-            rCtx.ip = ((rCtx.sfrq * (rCtx.rp - 1) + rCtx.fs1) / rCtx.fs1) * rCtx.nch;
-            nsmplwrt2 = upSample(rCtx, nsmplwrt1);
-            rCtx.rp += nsmplwrt1 * rCtx.sfrqfrqgcd / rCtx.osf;
-
-            rCtx.outBuffer.clear();
-            fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
-            rCtx.outBuffer.flip();
-
-            if (writeOutStream(rCtx, fpo, nsmplwrt2, dbps, ending)) {
-                break;
-            }
-
-            rCtx.ds = (rCtx.rp - 1) / rCtx.fs1sfrq;
-            assert (rCtx.inbuflen >= rCtx.ds);
-            System.arraycopy(rCtx.inbuf, rCtx.nch * rCtx.ds, rCtx.inbuf, 0, rCtx.nch * (rCtx.inbuflen - rCtx.ds));
-            rCtx.inbuflen -= rCtx.ds;
-            rCtx.rp -= rCtx.ds * rCtx.fs1sfrq;
-            if ((spcount++ & 7) == 7) {
-                showProgress((double) rCtx.sumread / chanklen);
-            }
-        }
-        showProgress(1);
-    }
-
-    private static int downsample(ResampleContext rCtx, int[][] samples, int length, double gain, boolean isLast) {
-        int nsmplwrt;
-        int writeLen;
-        int dbps = rCtx.twopass ? 8 : rCtx.dstFloat ? 4 : rCtx.dbps;
-        int toberead = ((rCtx.nb2 - rCtx.rps - 1) / rCtx.osf + 1);
-
-        if (rCtx.inbuflen + length < toberead && !isLast) {
-            rCtx.inbuflen += fillInBuf(rCtx, samples, 0, length);
-            return 0;
-        }
-
-        if (length == 0 && rCtx.inbuflen > 0 && isLast) {
-            Arrays.fill(rCtx.inbuf, rCtx.inbuflen * rCtx.nch, toberead * rCtx.nch, 0);
-            rCtx.sumread += rCtx.inbuflen;
-            nsmplwrt = downSample(rCtx);
-            rCtx.inbuflen = 0;
-            rCtx.rp += nsmplwrt * (rCtx.fs2 / rCtx.dfrq);
-            rCtx.outBuffer.clear();
-            fillOutBuf(rCtx, dbps, gain, nsmplwrt);
-            rCtx.outBuffer.flip();
-            return writeOutBytes(rCtx, nsmplwrt, dbps, 0, true);
-        }
-
-        int outBytesWritten = 0;
-        int lenUsed = 0;
-
-        while (lenUsed < length) {
-            toberead = ((rCtx.nb2 - rCtx.rps - 1) / rCtx.osf + 1) - rCtx.inbuflen;
-
-            if (length - lenUsed < toberead && !isLast) {
-                rCtx.inbuflen += fillInBuf(rCtx, samples, lenUsed, length - lenUsed);
-                return outBytesWritten;
-            }
-            rCtx.inbuflen += fillInBuf(rCtx, samples, lenUsed, toberead);
-            lenUsed += toberead;
-
-            rCtx.sumread += toberead;
-
-            nsmplwrt = downSample(rCtx);
-            rCtx.inbuflen = 0;
-            rCtx.rp += nsmplwrt * rCtx.fs2dfrq;
-
-            rCtx.outBuffer.clear();
-            fillOutBuf(rCtx, dbps, gain, nsmplwrt);
-            rCtx.outBuffer.flip();
-
-            writeLen = writeOutBytes(rCtx, nsmplwrt, dbps, outBytesWritten, isLast);
-            if (writeLen < 0) {
-                break;
-            }
-            outBytesWritten += writeLen;
-
-            rCtx.sumwrite += writeLen / rCtx.wbpf;
-
-            rCtx.ds = (rCtx.rp - 1) / rCtx.fs2fs1;
-
-            if (rCtx.ds > rCtx.nb2) {
-                rCtx.ds = rCtx.nb2;
-            }
-
-            int ch;
-            for (ch = 0; ch < rCtx.nch; ch++) {
-                System.arraycopy(rCtx.buf2[ch], rCtx.ds, rCtx.buf2[ch], 0, rCtx.nx + 1 + rCtx.nb2 - rCtx.ds);
-            }
-
-            rCtx.rp -= rCtx.ds * rCtx.fs2fs1;
-
-            for (ch = 0; ch < rCtx.nch; ch++) {
-                System.arraycopy(rCtx.buf1[ch], rCtx.nb2, rCtx.buf2[ch], rCtx.nx + 1, rCtx.nb2);
-            }
-
         }
         return outBytesWritten;
     }
@@ -1797,6 +1981,148 @@ public class JavaSSRC {
         return outBytesWritten;
     }
 
+    private static int no_src(ResampleContext rCtx, byte[] samples, int offset, int length, double gain) {
+        int i, ch;
+        double f, p;
+        int len = length;
+
+        if (len >= rCtx.inBuffer.remaining()) {
+            len = rCtx.inBuffer.remaining();
+        }
+
+        if (rCtx.inBuffer.position() + len < rCtx.bps * rCtx.nch) {
+            rCtx.inBuffer.put(samples, offset, len);
+            return 0;
+        }
+
+        int outBytesWritten = 0;
+        int lenUsed = 0;
+
+        int j = 0;
+        if (rCtx.nch == 1 && rCtx.rnch != rCtx.nch) {
+            j = rCtx.mono;
+        }
+
+        while (lenUsed < length) {
+            len = rCtx.inBuffer.remaining();
+            if (len > length - lenUsed) {
+                len = length - lenUsed;
+            }
+
+            rCtx.inBuffer.put(samples, offset + lenUsed, len);
+
+            if (rCtx.inBuffer.position() < rCtx.bps * rCtx.nch) {
+                break;
+            }
+
+            rCtx.inBuffer.flip();
+            rCtx.outBuffer.clear();
+
+            lenUsed += len;
+
+            if (rCtx.twopass) {
+                for (i = 0; i < rCtx.inBuffer.limit() - rCtx.bps * rCtx.rnch; i += rCtx.bps * rCtx.rnch) {
+                    for (ch = 0; ch < rCtx.nch; ch++) {
+                        f = readFromInBuffer(rCtx, i + (ch + j) * rCtx.bps) * gain;
+                        p = f > 0 ? f : -f;
+                        rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
+                        rCtx.outBuffer.putDouble(f);
+                    }
+                }
+            } else {
+                for (i = 0; i < rCtx.inBuffer.limit() - rCtx.bps * rCtx.rnch; i += rCtx.bps * rCtx.rnch) {
+                    for (ch = 0; ch < rCtx.dnch; ch++) {
+                        f = readFromInBuffer(rCtx, i + ((ch % rCtx.nch) + j) * rCtx.bps) * gain;
+                        writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
+                    }
+                }
+            }
+            rCtx.inBuffer.position(i);
+            rCtx.inBuffer.compact();
+            rCtx.outBuffer.flip();
+            if (rCtx.outBytes.length - outBytesWritten < rCtx.outBuffer.limit()) {
+                byte[] tmpBytes = new byte[outBytesWritten + rCtx.outBuffer.limit()];
+                System.arraycopy(rCtx.outBytes, 0, tmpBytes, 0, outBytesWritten);
+                rCtx.outBytes = tmpBytes;
+            }
+            rCtx.outBuffer.get(rCtx.outBytes, outBytesWritten, rCtx.outBuffer.limit());
+            outBytesWritten += rCtx.outBuffer.limit();
+        }
+        return outBytesWritten;
+    }
+    /* end byte[] input */
+
+    /* Stream input/output */
+    private void upsample(InputStream fpi, OutputStream fpo, double gain, long length) throws IOException {
+        int spcount = 0;
+        boolean ending;
+        int nsmplread, toberead, toberead2, tmpLen, readLen, nsmplwrt1;
+        boolean EOF = false;
+        int nsmplwrt2;
+        int dbps = rCtx.twopass ? 8 : rCtx.dstFloat ? 4 : rCtx.dbps;
+        long chanklen = length / rCtx.bps / rCtx.rnch;
+        int tobereadbase = (int) Math.floor((double) rCtx.nb2 * rCtx.sfrq / (rCtx.dfrq * rCtx.osf)) + 1 + rCtx.nx;
+        rCtx.sumread = rCtx.sumwrite = 0;
+
+        for (;;) {
+            toberead2 = toberead = tobereadbase - rCtx.inbuflen;
+            if (toberead + rCtx.sumread > chanklen) {
+                toberead = (int) (chanklen - rCtx.sumread);
+            }
+
+            rCtx.inBuffer.clear();
+            nsmplread = 0;
+            readLen = rCtx.bpf * toberead;
+            try {
+                while (nsmplread < readLen && !EOF) {
+                    tmpLen = fpi.read(rCtx.rawinbuf, nsmplread, readLen - nsmplread);
+                    if (tmpLen < 0) {
+                        EOF = true;
+                    } else {
+                        nsmplread += tmpLen;
+                    }
+                }
+            } catch (IOException e) {
+                EOF = true;
+            }
+            rCtx.inBuffer.limit(nsmplread);
+            nsmplread /= rCtx.bpf;
+            fillInBuf(rCtx, nsmplread);
+            Arrays.fill(rCtx.inbuf, rCtx.nch * rCtx.inbuflen + nsmplread * rCtx.nch, rCtx.nch * rCtx.inbuflen + rCtx.nch * toberead2, 0);
+
+            rCtx.inbuflen += toberead2;
+
+            rCtx.sumread += nsmplread;
+            ending = EOF || rCtx.sumread >= chanklen;
+
+            //nsmplwrt1 = ((rp-1)*srcSamplingRate/fs1+inbuflen-n1x)*dstSamplingRate*osf/srcSamplingRate;
+            //if (nsmplwrt1 > n2b2) nsmplwrt1 = n2b2;
+            nsmplwrt1 = rCtx.nb2;
+
+            rCtx.ip = ((rCtx.sfrq * (rCtx.rp - 1) + rCtx.fs1) / rCtx.fs1) * rCtx.nch;
+            nsmplwrt2 = upSample(rCtx, nsmplwrt1);
+            rCtx.rp += nsmplwrt1 * rCtx.sfrqfrqgcd / rCtx.osf;
+
+            rCtx.outBuffer.clear();
+            fillOutBuf(rCtx, dbps, gain, nsmplwrt2);
+            rCtx.outBuffer.flip();
+
+            if (writeOutStream(rCtx, fpo, nsmplwrt2, dbps, ending)) {
+                break;
+            }
+
+            rCtx.ds = (rCtx.rp - 1) / rCtx.fs1sfrq;
+            assert (rCtx.inbuflen >= rCtx.ds);
+            System.arraycopy(rCtx.inbuf, rCtx.nch * rCtx.ds, rCtx.inbuf, 0, rCtx.nch * (rCtx.inbuflen - rCtx.ds));
+            rCtx.inbuflen -= rCtx.ds;
+            rCtx.rp -= rCtx.ds * rCtx.fs1sfrq;
+            if ((spcount++ & 7) == 7) {
+                showProgress((double) rCtx.sumread / chanklen);
+            }
+        }
+        showProgress(1);
+    }
+
     private void downsample(InputStream fpi, OutputStream fpo, double gain, long length) throws IOException {
         int spcount = 0;
         int nsmplwrt2;
@@ -1868,6 +2194,58 @@ public class JavaSSRC {
 
         showProgress(1);
     }
+
+    private void no_src(InputStream fpi, OutputStream fpo, double gain, long length) throws IOException {
+        int ch, sumread = 0, readLen, tmpLen;
+        double f, p;
+        long chunklen = length / rCtx.bps / rCtx.rnch;
+        int j = 0;
+        if (rCtx.nch == 1 && rCtx.rnch != rCtx.nch) {
+            j = rCtx.mono;
+        }
+
+        while (sumread < chunklen) {
+            try {
+                rCtx.inBuffer.clear();
+                readLen = 0;
+                while (readLen < rCtx.bps * rCtx.rnch) {
+                    tmpLen = fpi.read(rCtx.rawinbuf, readLen, rCtx.bps * rCtx.rnch - readLen);
+                    if (tmpLen < 0) {
+                        throw new EOFException();
+                    }
+                    readLen += tmpLen;
+                }
+            } catch (EOFException ignored) {
+            }
+            rCtx.outBuffer.clear();
+
+            if (rCtx.twopass) {
+                for (ch = 0; ch < rCtx.nch; ch++) {
+                    f = readFromInBuffer(rCtx, (ch + j) * rCtx.bps) * gain;
+                    p = f > 0 ? f : -f;
+                    rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
+                    rCtx.outBuffer.putDouble(f);
+                }
+                fpo.write(rCtx.rawoutbuf, 0, 8 * rCtx.nch);
+            } else {
+                for (ch = 0; ch < rCtx.dnch; ch++) {
+                    f = readFromInBuffer(rCtx, (ch % rCtx.nch + j) * rCtx.bps) * gain;
+                    writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
+                }
+                fpo.write(rCtx.rawoutbuf, 0, rCtx.dbps * rCtx.dnch);
+            }
+
+            sumread++;
+
+            if ((sumread & 0x3ffff) == 0) {
+                showProgress((double) sumread / chunklen);
+            }
+        }
+
+        fpo.flush();
+        showProgress(1);
+    }
+    /* end Stream input/output */
 
     private static double readFromInBuffer(ResampleContext rCtx, int i) {
         if (rCtx.srcFloat) {
@@ -1949,178 +2327,6 @@ public class JavaSSRC {
         }
     }
 
-    private static int no_src(ResampleContext rCtx, int[][] samples, int length, double gain) {
-        int i, ch;
-        double f, p;
-        int len;
-
-        int outBytesWritten = 0;
-        int lenUsed = 0;
-
-        while (lenUsed < length) {
-            len = length - lenUsed;
-            rCtx.outBuffer.clear();
-            if (len > rCtx.outBuffer.limit() / rCtx.nch) {
-                len = rCtx.outBuffer.limit() / rCtx.nch;
-            }
-            lenUsed += len;
-
-            if (rCtx.twopass) {
-                for (i = 0; i < len; i++) {
-                    for (ch = 0; ch < rCtx.nch; ch++) {
-                        f = intSampleToDouble(rCtx, samples[ch % rCtx.nch][i]) * gain;
-                        p = f > 0 ? f : -f;
-                        rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
-                        rCtx.outBuffer.putDouble(f);
-                    }
-                }
-            } else if (rCtx.dbps == rCtx.bps && !rCtx.dstFloat) {
-                for (i = 0; i < len; i++) {
-                    for (ch = 0; ch < rCtx.dnch; ch++) {
-                        writeIntToBuffer(rCtx, samples[ch % rCtx.nch][i], gain);
-                    }
-                }
-            } else {
-                for (i = 0; i < len; i++) {
-                    for (ch = 0; ch < rCtx.dnch; ch++) {
-                        f = intSampleToDouble(rCtx, samples[ch % rCtx.nch][i]) * gain;
-                        writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
-                    }
-                }
-            }
-            rCtx.outBuffer.flip();
-            if (rCtx.outBytes.length - outBytesWritten < rCtx.outBuffer.limit()) {
-                byte[] tmpBytes = new byte[outBytesWritten + rCtx.outBuffer.limit()];
-                System.arraycopy(rCtx.outBytes, 0, tmpBytes, 0, outBytesWritten);
-                rCtx.outBytes = tmpBytes;
-            }
-            rCtx.outBuffer.get(rCtx.outBytes, outBytesWritten, rCtx.outBuffer.limit());
-            outBytesWritten += rCtx.outBuffer.limit();
-        }
-        return outBytesWritten;
-    }
-
-    private static int no_src(ResampleContext rCtx, byte[] samples, int offset, int length, double gain) {
-        int i, ch;
-        double f, p;
-        int len = length;
-
-        if (len >= rCtx.inBuffer.remaining()) {
-            len = rCtx.inBuffer.remaining();
-        }
-
-        if (rCtx.inBuffer.position() + len < rCtx.bps * rCtx.nch) {
-            rCtx.inBuffer.put(samples, offset, len);
-            return 0;
-        }
-
-        int outBytesWritten = 0;
-        int lenUsed = 0;
-
-        int j = 0;
-        if (rCtx.nch == 1 && rCtx.rnch != rCtx.nch) {
-            j = rCtx.mono;
-        }
-
-        while (lenUsed < length) {
-            len = rCtx.inBuffer.remaining();
-            if (len > length - lenUsed) {
-                len = length - lenUsed;
-            }
-
-            rCtx.inBuffer.put(samples, offset + lenUsed, len);
-
-            if (rCtx.inBuffer.position() < rCtx.bps * rCtx.nch) {
-                break;
-            }
-
-            rCtx.inBuffer.flip();
-            rCtx.outBuffer.clear();
-
-            lenUsed += len;
-
-            if (rCtx.twopass) {
-                for (i = 0; i < rCtx.inBuffer.limit() - rCtx.bps * rCtx.rnch; i += rCtx.bps * rCtx.rnch) {
-                    for (ch = 0; ch < rCtx.nch; ch++) {
-                        f = readFromInBuffer(rCtx, i + (ch + j) * rCtx.bps) * gain;
-                        p = f > 0 ? f : -f;
-                        rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
-                        rCtx.outBuffer.putDouble(f);
-                    }
-                }
-            } else {
-                for (i = 0; i < rCtx.inBuffer.limit() - rCtx.bps * rCtx.rnch; i += rCtx.bps * rCtx.rnch) {
-                    for (ch = 0; ch < rCtx.dnch; ch++) {
-                        f = readFromInBuffer(rCtx, i + ((ch % rCtx.nch) + j) * rCtx.bps) * gain;
-                        writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
-                    }
-                }
-            }
-            rCtx.inBuffer.position(i);
-            rCtx.inBuffer.compact();
-            rCtx.outBuffer.flip();
-            if (rCtx.outBytes.length - outBytesWritten < rCtx.outBuffer.limit()) {
-                byte[] tmpBytes = new byte[outBytesWritten + rCtx.outBuffer.limit()];
-                System.arraycopy(rCtx.outBytes, 0, tmpBytes, 0, outBytesWritten);
-                rCtx.outBytes = tmpBytes;
-            }
-            rCtx.outBuffer.get(rCtx.outBytes, outBytesWritten, rCtx.outBuffer.limit());
-            outBytesWritten += rCtx.outBuffer.limit();
-        }
-        return outBytesWritten;
-    }
-
-    private void no_src(InputStream fpi, OutputStream fpo, double gain, long length) throws IOException {
-        int ch, sumread = 0, readLen, tmpLen;
-        double f, p;
-        long chunklen = length / rCtx.bps / rCtx.rnch;
-        int j = 0;
-        if (rCtx.nch == 1 && rCtx.rnch != rCtx.nch) {
-            j = rCtx.mono;
-        }
-
-        while (sumread < chunklen) {
-            try {
-                rCtx.inBuffer.clear();
-                readLen = 0;
-                while (readLen < rCtx.bps * rCtx.rnch) {
-                    tmpLen = fpi.read(rCtx.rawinbuf, readLen, rCtx.bps * rCtx.rnch - readLen);
-                    if (tmpLen < 0) {
-                        throw new EOFException();
-                    }
-                    readLen += tmpLen;
-                }
-            } catch (EOFException ignored) {
-            }
-            rCtx.outBuffer.clear();
-
-            if (rCtx.twopass) {
-                for (ch = 0; ch < rCtx.nch; ch++) {
-                    f = readFromInBuffer(rCtx, (ch + j) * rCtx.bps) * gain;
-                    p = f > 0 ? f : -f;
-                    rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
-                    rCtx.outBuffer.putDouble(f);
-                }
-                fpo.write(rCtx.rawoutbuf, 0, 8 * rCtx.nch);
-            } else {
-                for (ch = 0; ch < rCtx.dnch; ch++) {
-                    f = readFromInBuffer(rCtx, (ch % rCtx.nch + j) * rCtx.bps) * gain;
-                    writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
-                }
-                fpo.write(rCtx.rawoutbuf, 0, rCtx.dbps * rCtx.dnch);
-            }
-
-            sumread++;
-
-            if ((sumread & 0x3ffff) == 0) {
-                showProgress((double) sumread / chunklen);
-            }
-        }
-
-        fpo.flush();
-        showProgress(1);
-    }
-
     public void resetShaper() {
         rCtx.randptr = 0;
     }
@@ -2184,6 +2390,23 @@ public class JavaSSRC {
 
     public static double dBToGain(double att) {
         return Math.pow(10, att / 20);
+    }
+
+    public int resample(float[][] samples, int length, boolean isLast) {
+        if (rCtx == null) {
+            throw new IllegalStateException("Resampler has not been initialized");
+        }
+
+        if(!rCtx.srcFloat)
+            throw new IllegalStateException("Source is not set to floating point");
+
+        if (rCtx.sfrq < rCtx.dfrq) {
+            return upsample(rCtx, samples, length, rCtx.gain, isLast);
+        } else if (rCtx.sfrq > rCtx.dfrq) {
+            return downsample(rCtx, samples, length, rCtx.gain, isLast);
+        } else {
+            return no_src(rCtx, samples, length, rCtx.gain);
+        }
     }
 
     public int resample(int[][] samples, int length, boolean isLast) {
