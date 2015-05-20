@@ -24,15 +24,15 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.DoubleBuffer;
 import java.util.Arrays;
 import java.util.Random;
 
+import com.angrygoat.audio.resample.fft.FFT;
+import com.angrygoat.audio.resample.fft.VaviSoundFFT;
 import vavi.util.I0Bessel;
-import vavi.util.SplitRadixFft;
 
 @SuppressWarnings("unused")
 public class JavaSSRC {
@@ -95,8 +95,6 @@ public class JavaSSRC {
     private final static double NORMALIZE_FACTOR_24 = 1 / (double) 0x7fffff;
     private final static double NORMALIZE_FACTOR_32 = 1 / (double) 0x7fffffff;
 
-    private final SplitRadixFft FFT = new SplitRadixFft();
-
     private ProgressListener listener = null;
     private int srcChannels = 2;
     private int dstChannels = 2;
@@ -116,6 +114,7 @@ public class JavaSSRC {
     private boolean srcFloat = false;
     private boolean dstFloat = false;
     private String tempFilename = null;
+    private FFT fft = new VaviSoundFFT();
 
     private ResampleContext rCtx = null;
 
@@ -144,7 +143,7 @@ public class JavaSSRC {
         protected int ditherSample = 0;
         protected ByteOrder srcByteOrder = ByteOrder.LITTLE_ENDIAN;
         protected String tmpFn = null;
-        protected SplitRadixFft FFT;
+        protected FFT fft;
         protected double[][] shapebuf;
         protected int shaper_type, shaper_len, shaper_clipmin, shaper_clipmax;
         protected double[] randbuf;
@@ -163,8 +162,7 @@ public class JavaSSRC {
         int n1, n2;
         int nx, ny, nb, nb2;
         int[] fOrder, fInc;
-        int[] fft_ip;
-        double[] fft_w, stageA;
+        double[] stageA;
         double[][] stageB;
         byte[] rawinbuf, rawoutbuf;
         ByteBuffer inBuffer, outBuffer;
@@ -191,8 +189,8 @@ public class JavaSSRC {
         rCtx.sp = rCtx.rp = rCtx.rps = rCtx.ds = rCtx.osc = 0;
         rCtx.peak = 0;
 
-        rCtx.fft_ip[0] = 0;
-        rCtx.FFT.rdft(rCtx.nb, 1, rCtx.stageA, rCtx.fft_ip, rCtx.fft_w);
+        rCtx.fft.reset();
+        rCtx.fft.realDFT(rCtx.stageA);
 
         for (int i = 0; i < rCtx.nch; i++) {
             Arrays.fill(rCtx.buf1[i], 0);
@@ -335,9 +333,13 @@ public class JavaSSRC {
         this.tempFilename = tempFilename;
     }
 
+    public void setFFT(FFT fft){
+        this.fft = fft;
+    }
+
     public void initialize() {
         rCtx = new ResampleContext();
-        rCtx.FFT = FFT;
+        rCtx.fft = fft;
         rCtx.rnch = srcChannels;
         rCtx.mono = monoChannel < srcChannels ? monoChannel : srcChannels - 1;
         if (rCtx.rnch > 1 && rCtx.mono > -1) {
@@ -637,12 +639,8 @@ public class JavaSSRC {
             rCtx.stageA[i + rCtx.n2 / 2] = win(i, rCtx.n2, alp, iza) * hn_lpf(i, lpf, rCtx.fs2) / rCtx.nb * 2;
         }
 
-        ipsize = (int) (2 + Math.sqrt(rCtx.nb));
-        rCtx.fft_ip = new int[ipsize];
-        wsize = rCtx.nb / 2;
-        rCtx.fft_w = new double[wsize];
-
-        rCtx.FFT.rdft(rCtx.nb, 1, rCtx.stageA, rCtx.fft_ip, rCtx.fft_w);
+        rCtx.fft.init(rCtx.nb);
+        rCtx.fft.realDFT(rCtx.stageA);
 
         /* Apply filters */
         rCtx.nb2 = rCtx.nb / 2;
@@ -725,13 +723,8 @@ public class JavaSSRC {
             rCtx.stageA[i + rCtx.n1 / 2] = win(i, rCtx.n1, alp, iza) * hn_lpf(i, lpf, rCtx.fs1) * rCtx.fs1 / rCtx.sfrq / rCtx.nb * 2;
         }
 
-        ipsize = (int) (2 + Math.sqrt(rCtx.nb));
-        rCtx.fft_ip = new int[ipsize];
-        rCtx.fft_ip[0] = 0;
-        wsize = rCtx.nb / 2;
-        rCtx.fft_w = new double[wsize];
-
-        rCtx.FFT.rdft(rCtx.nb, 1, rCtx.stageA, rCtx.fft_ip, rCtx.fft_w);
+        rCtx.fft.init(rCtx.nb);
+        rCtx.fft.realDFT(rCtx.stageA);
 
         // Make stage 2 filter 
         if (rCtx.osf == 1) {
@@ -1312,7 +1305,7 @@ public class JavaSSRC {
             // apply stage 2 filter
             Arrays.fill(rCtx.buf2[ch], nsmplwrt1, rCtx.nb, 0);
 
-            rCtx.FFT.rdft(rCtx.nb, 1, rCtx.buf2[ch], rCtx.fft_ip, rCtx.fft_w);
+            rCtx.fft.realDFT(rCtx.buf2[ch]);
 
             rCtx.buf2[ch][0] = rCtx.stageA[0] * rCtx.buf2[ch][0];
             rCtx.buf2[ch][1] = rCtx.stageA[1] * rCtx.buf2[ch][1];
@@ -1327,7 +1320,7 @@ public class JavaSSRC {
                 rCtx.buf2[ch][i * 2 + 1] = im;
             }
 
-            rCtx.FFT.rdft(rCtx.nb, -1, rCtx.buf2[ch], rCtx.fft_ip, rCtx.fft_w);
+            rCtx.fft.realInverseDFT(rCtx.buf2[ch]);
 
             for (i = rCtx.osc, j = 0; i < rCtx.nb2; i += rCtx.osf, j++) {
                 d = (rCtx.buf1[ch][j] + rCtx.buf2[ch][i]);
@@ -1375,7 +1368,7 @@ public class JavaSSRC {
             }
 
             rCtx.rps = i - rCtx.nb2;
-            rCtx.FFT.rdft(rCtx.nb, 1, rCtx.buf1[ch], rCtx.fft_ip, rCtx.fft_w);
+            rCtx.fft.realDFT(rCtx.buf1[ch]);
             rCtx.buf1[ch][0] = rCtx.stageA[0] * rCtx.buf1[ch][0];
             rCtx.buf1[ch][1] = rCtx.stageA[1] * rCtx.buf1[ch][1];
             for (i = 1; i < rCtx.nb2; i++) {
@@ -1386,7 +1379,7 @@ public class JavaSSRC {
                 rCtx.buf1[ch][i * 2 + 1] = im;
             }
 
-            rCtx.FFT.rdft(rCtx.nb, -1, rCtx.buf1[ch], rCtx.fft_ip, rCtx.fft_w);
+            rCtx.fft.realInverseDFT(rCtx.buf1[ch]);
             for (i = 0; i < rCtx.nb2; i++) {
                 rCtx.buf2[ch][rCtx.nx + 1 + i] += rCtx.buf1[ch][i];
             }

@@ -17,6 +17,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 
 import com.angrygoat.audio.resample.JavaSSRC;
+
 import java.io.FileNotFoundException;
 
 public class Resample implements JavaSSRC.ProgressListener {
@@ -385,5 +386,6 @@ public class Resample implements JavaSSRC.ProgressListener {
                 }
             }
         }
+        System.exit(0);
     }
 }
