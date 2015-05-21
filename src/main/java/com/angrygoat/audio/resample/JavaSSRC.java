@@ -1350,9 +1350,7 @@ public class JavaSSRC {
         for (ch = 0; ch < rCtx.nch; ch++) {
             rCtx.rps = rps_backup;
 
-            for (k = 0; k < rCtx.rps; k++) {
-                rCtx.buf1[ch][k] = 0;
-            }
+            Arrays.fill(rCtx.buf1[ch],0,rCtx.rps,0);
 
             for (i = rCtx.rps, j = 0; i < rCtx.nb2; i += rCtx.osf, j++) {
 //				assert(j < ((rCtx.nb2-rCtx.rps-1)/rCtx.osf+1));
@@ -1363,9 +1361,7 @@ public class JavaSSRC {
             }
 
 //			assert(j == ((rCtx.nb2-rCtx.rps-1)/rCtx.osf+1));
-            for (k = rCtx.nb2; k < rCtx.nb; k++) {
-                rCtx.buf1[ch][k] = 0;
-            }
+            Arrays.fill(rCtx.buf1[ch],rCtx.nb2,rCtx.nb,0);
 
             rCtx.rps = i - rCtx.nb2;
             rCtx.fft.realDFT(rCtx.buf1[ch]);
