@@ -398,7 +398,8 @@ public class JavaSSRC {
             if (rCtx.twopass) {
                 rCtx.rawoutbuf = new byte[16384 * 8 * rCtx.nch];
             } else {
-                rCtx.rawoutbuf = new byte[(int) (16384 * outBps * rCtx.dnch * ((double) outBps / rCtx.bps))];
+//                rCtx.rawoutbuf = new byte[(int) (16384 * outBps * rCtx.dnch * ((double) outBps / rCtx.bps))];
+                rCtx.rawoutbuf = new byte[16384 * outBps * rCtx.dnch];
             }
             rCtx.inBuffer = ByteBuffer.wrap(rCtx.rawinbuf).order(rCtx.srcByteOrder);
             rCtx.outBuffer = ByteBuffer.wrap(rCtx.rawoutbuf).order(ByteOrder.LITTLE_ENDIAN);
@@ -912,8 +913,12 @@ public class JavaSSRC {
     private static int fillInBuf(ResampleContext rCtx, float[][] samples, int offset, int length) {
         int ibOffset = rCtx.nch * rCtx.inbuflen;
         int len = length * rCtx.nch;
+        int j = 0;
+        if (rCtx.nch == 1 && rCtx.rnch != rCtx.nch) {
+            j = rCtx.mono;
+        }
         for (int i = 0; i < len; i++) {
-            rCtx.inbuf[ibOffset + i] = samples[i % rCtx.nch][offset + i / rCtx.nch];
+            rCtx.inbuf[ibOffset + i] = samples[i % rCtx.nch + j][offset + i / rCtx.nch];
         }
         return length;
     }
@@ -921,25 +926,30 @@ public class JavaSSRC {
     private static int fillInBuf(ResampleContext rCtx, int[][] samples, int offset, int length) {
         int ibOffset = rCtx.nch * rCtx.inbuflen;
         int len = length * rCtx.nch;
+        int j = 0;
+        if (rCtx.nch == 1 && rCtx.rnch != rCtx.nch) {
+            j = rCtx.mono;
+        }
+
         switch (rCtx.bps) {
             case 1:
                 for (int i = 0; i < len; i++) {
-                    rCtx.inbuf[ibOffset + i] = NORMALIZE_FACTOR_8 * ((samples[i % rCtx.nch][offset + i / rCtx.nch] & 0xff) - 128);
+                    rCtx.inbuf[ibOffset + i] = NORMALIZE_FACTOR_8 * ((samples[i % rCtx.nch + j][offset + i / rCtx.nch] & 0xff) - 128);
                 }
                 break;
             case 2:
                 for (int i = 0; i < len; i++) {
-                    rCtx.inbuf[ibOffset + i] = NORMALIZE_FACTOR_16 * samples[i % rCtx.nch][offset + i / rCtx.nch];
+                    rCtx.inbuf[ibOffset + i] = NORMALIZE_FACTOR_16 * samples[i % rCtx.nch + j][offset + i / rCtx.nch];
                 }
                 break;
             case 3:
                 for (int i = 0; i < len; i++) {
-                    rCtx.inbuf[ibOffset + i] = NORMALIZE_FACTOR_24 * samples[i % rCtx.nch][offset + i / rCtx.nch];
+                    rCtx.inbuf[ibOffset + i] = NORMALIZE_FACTOR_24 * samples[i % rCtx.nch + j][offset + i / rCtx.nch];
                 }
                 break;
             case 4:
                 for (int i = 0; i < len; i++) {
-                    rCtx.inbuf[ibOffset + i] = NORMALIZE_FACTOR_32 * samples[i % rCtx.nch][offset + i / rCtx.nch];
+                    rCtx.inbuf[ibOffset + i] = NORMALIZE_FACTOR_32 * samples[i % rCtx.nch + j][offset + i / rCtx.nch];
                 }
                 break;
         }
@@ -956,7 +966,7 @@ public class JavaSSRC {
         }
         if (rCtx.srcFloat) {
             for (int i = 0; i < len; i++, j += jCnt) {
-                rCtx.inbuf[offset + i] = rCtx.inBuffer.getFloat(j);
+                rCtx.inbuf[offset + i] = rCtx.inBuffer.getDouble(j);
             }
         } else {
             switch (rCtx.bps) {
@@ -1567,6 +1577,11 @@ public class JavaSSRC {
         int outBytesWritten = 0;
         int lenUsed = 0;
 
+        int j = 0;
+        if (rCtx.nch == 1 && rCtx.rnch != rCtx.nch) {
+            j = rCtx.mono;
+        }
+
         while (lenUsed < length) {
             len = length - lenUsed;
             rCtx.outBuffer.clear();
@@ -1578,7 +1593,7 @@ public class JavaSSRC {
             if (rCtx.twopass) {
                 for (i = 0; i < len; i++) {
                     for (ch = 0; ch < rCtx.nch; ch++) {
-                        f = samples[ch % rCtx.nch][i] * gain;
+                        f = samples[ch % rCtx.nch + j][i] * gain;
                         p = f > 0 ? f : -f;
                         rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
                         rCtx.outBuffer.putDouble(f);
@@ -1587,7 +1602,7 @@ public class JavaSSRC {
             } else {
                 for (i = 0; i < len; i++) {
                     for (ch = 0; ch < rCtx.dnch; ch++) {
-                        f = samples[ch % rCtx.nch][i] * gain;
+                        f = samples[ch % rCtx.nch + j][i] * gain;
                         writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
                     }
                 }
@@ -1757,6 +1772,11 @@ public class JavaSSRC {
         int outBytesWritten = 0;
         int lenUsed = 0;
 
+        int j = 0;
+        if (rCtx.nch == 1 && rCtx.rnch != rCtx.nch) {
+            j = rCtx.mono;
+        }
+
         while (lenUsed < length) {
             len = length - lenUsed;
             rCtx.outBuffer.clear();
@@ -1768,7 +1788,7 @@ public class JavaSSRC {
             if (rCtx.twopass) {
                 for (i = 0; i < len; i++) {
                     for (ch = 0; ch < rCtx.nch; ch++) {
-                        f = intSampleToDouble(rCtx, samples[ch % rCtx.nch][i]) * gain;
+                        f = intSampleToDouble(rCtx, samples[ch % rCtx.nch + j][i]) * gain;
                         p = f > 0 ? f : -f;
                         rCtx.peak = rCtx.peak < p ? p : rCtx.peak;
                         rCtx.outBuffer.putDouble(f);
@@ -1777,13 +1797,13 @@ public class JavaSSRC {
             } else if (rCtx.dbps == rCtx.bps && !rCtx.dstFloat) {
                 for (i = 0; i < len; i++) {
                     for (ch = 0; ch < rCtx.dnch; ch++) {
-                        writeIntToBuffer(rCtx, samples[ch % rCtx.nch][i], gain);
+                        writeIntToBuffer(rCtx, samples[ch % rCtx.nch + j][i], gain);
                     }
                 }
             } else {
                 for (i = 0; i < len; i++) {
                     for (ch = 0; ch < rCtx.dnch; ch++) {
-                        f = intSampleToDouble(rCtx, samples[ch % rCtx.nch][i]) * gain;
+                        f = intSampleToDouble(rCtx, samples[ch % rCtx.nch + j][i]) * gain;
                         writeToOutBuffer(rCtx, f, (ch % rCtx.nch));
                     }
                 }
@@ -2238,7 +2258,7 @@ public class JavaSSRC {
 
     private static double readFromInBuffer(ResampleContext rCtx, int i) {
         if (rCtx.srcFloat) {
-            return rCtx.inBuffer.getFloat(i);
+            return rCtx.inBuffer.getDouble(i);
         } else {
             switch (rCtx.bps) {
                 case 1:
