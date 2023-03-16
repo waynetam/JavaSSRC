@@ -1,5 +1,5 @@
 
-/**
+/*
  * *****************************************************************************
  * Copyright (c) 2013, Wayne Tam All rights reserved.
  *
@@ -65,7 +65,7 @@ public class ResamplerHelper {
     public static boolean dstFloat = false;
 
     public static double processPCM(FileInputStream fpi, FileOutputStream fpo, JavaSSRC.ProgressListener listener) throws IOException {
-        double peak = 0;
+        double peak;
 
         JavaSSRC javaSSRC = new JavaSSRC();
 		// Configure the resampler
@@ -211,7 +211,7 @@ public class ResamplerHelper {
 
                 javaSSRC.resetShaper();
 
-                long fptlen = file.length() / (8 * srcChannels);
+                long fptlen = file.length() / (8L * srcChannels);
                 int sumread = 0;
                 int ch;
                 try {
@@ -492,47 +492,53 @@ public class ResamplerHelper {
             long vTimestamp;
             boolean foundOne = false;
             double freq;
+            label:
             while (true) {
                 inStrm.readFully(buf, 0, 4);
                 ckSize = inStrm.readInt();
 
                 ckID = new String(buf, 0, 4);
-                if ("COMM".equals(ckID)) {
-                    srcChannels = inStrm.readShort();
-                    numSampleFrames = inStrm.readInt();
-                    srcBPS = inStrm.readShort();
-                    inStrm.readFully(buf, 0, 10);
-                    freq = extendedToDouble(buf);
-                    srcSamplingRate = (int) freq;
-                    if (isAIFC) {
-                        ckID = new String(buf, 0, 4);
-                        if (!"NONE".equals(ckID)) {
-                            System.err.println("Compressed AIFF files are not supported");
+                switch (ckID) {
+                    case "COMM":
+                        srcChannels = inStrm.readShort();
+                        numSampleFrames = inStrm.readInt();
+                        srcBPS = inStrm.readShort();
+                        inStrm.readFully(buf, 0, 10);
+                        freq = extendedToDouble(buf);
+                        srcSamplingRate = (int) freq;
+                        if (isAIFC) {
+                            inStrm.readFully(buf, 0, 4);
+                            ckID = new String(buf, 0, 4);
+                            if (!"NONE".equals(ckID)) {
+                                System.err.println("Compressed AIFF files are not supported");
+                                return false;
+                            }
+                            if (ckSize - 22 > 0) {
+                                //noinspection ResultOfMethodCallIgnored
+                                inStrm.skip(ckSize - 22);
+                            }
+                        }
+                        if (foundOne) {
+                            break label;
+                        }
+                        foundOne = true;
+                        break;
+                    case "SSND":
+                        offset = inStrm.readInt();
+                        inStrm.readInt();
+                        dataPos = fc.position() + offset;
+                        if (foundOne) {
+                            break label;
+                        }
+                        foundOne = true;
+                        break;
+                    case "FVER":
+                        vTimestamp = inStrm.readLong();
+                        if (vTimestamp != 0xA2805140L) {
+                            System.err.println("AIFF format version not recognized");
                             return false;
                         }
-                        if (ckSize - 22 > 0) {
-                            //noinspection ResultOfMethodCallIgnored
-                            inStrm.skip(ckSize - 22);
-                        }
-                    }
-                    if (foundOne) {
                         break;
-                    }
-                    foundOne = true;
-                } else if ("SSND".equals(ckID)) {
-                    offset = inStrm.readInt();
-                    inStrm.readInt();
-                    dataPos = fc.position() + offset;
-                    if (foundOne) {
-                        break;
-                    }
-                    foundOne = true;
-                } else if ("FVER".equals(ckID)) {
-                    vTimestamp = inStrm.readInt();
-                    if (vTimestamp != 0xA2805140l) {
-                        System.err.println("AIFF format version not recognized");
-                        return false;
-                    }
                 }
             }
             if (srcBPS != 8 && srcBPS != 16 && srcBPS != 24 && srcBPS != 32) {
@@ -540,7 +546,7 @@ public class ResamplerHelper {
                 return false;
             }
             srcBPS /= 8;
-            length = numSampleFrames * srcChannels * srcBPS;
+            length = (long) numSampleFrames * srcChannels * srcBPS;
             if (length == 0) {
                 System.err.println("Couldn't find data chank");
                 return false;
@@ -550,10 +556,7 @@ public class ResamplerHelper {
         } catch (EOFException eof) {
             System.err.println("Couldn't find data chank");
             return false;
-        } catch (NumberFormatException e1) {
-            System.err.println("Error reading file header");
-            return false;
-        } catch (IOException e1) {
+        } catch (NumberFormatException | IOException e1) {
             System.err.println("Error reading file header");
             return false;
         }
@@ -609,7 +612,7 @@ public class ResamplerHelper {
                 try {
                     bb.clear();
                     inStrm.readFully(buf, 0, 4);
-                    length = (long) bb.getInt();
+                    length = bb.getInt();
                 } catch (IOException ex) {
                     break;
                 }
@@ -635,7 +638,6 @@ public class ResamplerHelper {
         return true;
     }
 
-    @SuppressWarnings("StatementWithEmptyBody")
     public static int readFileHeader(FileInputStream fpi) {
         DataInputStream inStrm = new DataInputStream(fpi);
 
@@ -643,17 +645,20 @@ public class ResamplerHelper {
         try {
             inStrm.readFully(buf, 0, 4);
             String fType = new String(buf, 0, 4);
-            if ("RIFF".equals(fType)) {
-                byteOrder = ByteOrder.LITTLE_ENDIAN;
-                if (readWavHeader(inStrm, fpi.getChannel())) {
-                    return 1;
-                }
-            } else if ("FORM".equals(fType)) {
-                byteOrder = ByteOrder.BIG_ENDIAN;
-                if (readAiffHeader(inStrm, fpi.getChannel())) {
-                    return 2;
-                }
-            } else if ("fLaC".equals(fType)) {
+            switch (fType) {
+                case "RIFF":
+                    byteOrder = ByteOrder.LITTLE_ENDIAN;
+                    if (readWavHeader(inStrm, fpi.getChannel())) {
+                        return 1;
+                    }
+                    break;
+                case "FORM":
+                    byteOrder = ByteOrder.BIG_ENDIAN;
+                    if (readAiffHeader(inStrm, fpi.getChannel())) {
+                        return 2;
+                    }
+                    break;
+                case "fLaC":
                 /*				fpi.getChannel().position(0);
                  FLACDecoder flacDec = new FLACDecoder(inStrm);
                  StreamInfo strmInfo = flacDec.readStreamInfo();
@@ -663,6 +668,7 @@ public class ResamplerHelper {
                  length = strmInfo.getTotalSamples() * srcBPS * srcChannels;
                  fpi.getChannel().position(0);
                  return 3;*/
+                    break;
             }
         } catch (IOException e1) {
             System.err.println("Error reading file header");
